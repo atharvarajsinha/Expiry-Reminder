@@ -1,0 +1,28 @@
+Your vehicle {{ document_label|lower }} {{ urgency }}.
+
+Vehicle:
+{{ vehicle_no }}
+
+Vehicle:
+{{ maker_model }}
+
+Document:
+{{ document_label }}
+{% if company %}
+Insurance Company:
+{{ company }}
+{% endif %}{% if reference_no %}
+{{ reference_label }}:
+{{ reference_no }}
+{% endif %}
+Expiry Date:
+{{ expiry_date }}
+
+Days Remaining:
+{% if days_remaining == 0 %}Expires today{% elif days_remaining == 1 %}1 day{% else %}{{ days_remaining }} days{% endif %}
+
+Please renew your {{ document_label|lower }} before the expiry date.
+{% if frontend_url %}
+Open the app: {{ frontend_url }}
+{% endif %}
+-- Vehicle Document Reminder

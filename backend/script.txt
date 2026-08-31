@@ -1,0 +1,239 @@
+===============================================================================
+ HOSTING THE BACKEND ON RENDER
+===============================================================================
+
+You create 4 things on Render, in this order:
+
+   1. Key Value        - Redis (the task queue)
+   2. Web Service      - the API
+   3. Background Worker- runs vehicle fetches and sends reminder emails
+   4. Cron Job         - triggers the daily reminder sweep
+
+Steps 2, 3 and 4 all use the SAME repo, the SAME Root Directory and the
+SAME Build Command. Only the Start Command differs.
+
+
+===============================================================================
+ STEP 0 - PUSH THE CODE TO GITHUB
+===============================================================================
+
+   cd D:\remind-vahan
+   git init
+   git add .
+   git commit -m "Initial commit"
+   git branch -M main
+   git remote add origin https://github.com/<you>/<repo>.git
+   git push -u origin main
+
+Check that .env was NOT uploaded:
+
+   git ls-files | findstr /I ".env"
+
+Only  backend/.env.example  should appear.
+
+
+===============================================================================
+ STEP 1 - REDIS
+===============================================================================
+
+   New +  ->  Key Value
+   Name   :  vehicle-reminder-redis
+
+Open it and copy the INTERNAL connection string. It looks like:
+
+   redis://red-xxxxxxxxxxxx:6379
+
+You will paste this as REDIS_URL in step 5.
+
+
+===============================================================================
+ STEP 2 - WEB SERVICE
+===============================================================================
+
+   New +  ->  Web Service  ->  pick your repo
+
+   Name              :  vehicle-reminder-api
+   Language          :  Python 3
+   Branch            :  main
+   Root Directory    :  backend
+   Region            :  Singapore
+
+   Build Command:
+   pip install -r requirements.txt
+
+   Start Command:
+   gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 3 --timeout 120 --access-logfile - --error-logfile -
+
+   Health Check Path :  /api/health/
+
+Add the environment variables from step 5, then Deploy.
+
+
+===============================================================================
+ STEP 3 - BACKGROUND WORKER
+===============================================================================
+
+   New +  ->  Background Worker  ->  same repo
+
+   Name              :  vehicle-reminder-worker
+   Root Directory    :  backend
+
+   Build Command:
+   pip install -r requirements.txt
+
+   Start Command:
+   celery -A config worker --loglevel info --concurrency 2
+
+A Background Worker has no URL and no health check. That is normal.
+Add the SAME environment variables from step 5.
+
+
+===============================================================================
+ STEP 4 - CRON JOB (daily reminders)
+===============================================================================
+
+   New +  ->  Cron Job  ->  same repo
+
+   Name              :  vehicle-reminder-daily
+   Root Directory    :  backend
+   Schedule          :  30 3 * * *
+
+   Build Command:
+   pip install -r requirements.txt
+
+   Command:
+   python manage.py shell -c "from reminders.tasks import daily_reminder_check; print(daily_reminder_check.apply().get())"
+
+Render cron schedules are in UTC.  30 3 * * *  =  09:00 India time.
+Add the SAME environment variables from step 5.
+
+
+===============================================================================
+ STEP 5 - ENVIRONMENT VARIABLES
+===============================================================================
+
+Set these on ALL THREE services (web, worker, cron).
+Easiest way: Env Groups -> New Environment Group -> add every line below ->
+attach the group to all three.
+
+   DEBUG                 False
+   SECRET_KEY            <click Generate>
+   JWT_SECRET_KEY        <click Generate>
+   APP_USERNAME          <your login username>
+   APP_PASSWORD          <your login password>
+   MONGODB_URI           mongodb+srv://USER:PASS@cluster0.xxxx.mongodb.net/?retryWrites=true&w=majority
+   MONGODB_DATABASE      vehicle_reminder
+   REDIS_URL             <internal URL from step 1>
+   FIREAPI_API_KEY       <your FireAPI key>
+   BREVO_API_KEY         <your Brevo key>
+   BREVO_SENDER_EMAIL    <verified sender in Brevo>
+   REMINDER_EMAIL        <where reminders are delivered>
+   FRONTEND_URL          https://<your-frontend>.onrender.com
+   CORS_ALLOWED_ORIGINS  https://<your-frontend>.onrender.com
+   TIME_ZONE             Asia/Kolkata
+   AUTH_COOKIE_SECURE    True
+   AUTH_COOKIE_SAMESITE  None
+   PYTHON_VERSION        3.12.7
+
+AUTH_COOKIE_SECURE and AUTH_COOKIE_SAMESITE are required. Without them the
+browser drops the login cookie and every request after login returns 401.
+
+FRONTEND_URL is printed inside every reminder email. Do not leave it as
+localhost.
+
+
+===============================================================================
+ STEP 6 - MONGODB ATLAS
+===============================================================================
+
+   Atlas -> Network Access -> Add IP Address -> 0.0.0.0/0
+
+Without this, Render cannot reach your database and /api/health/ fails.
+URL-encode any special characters in the database password.
+
+
+===============================================================================
+ STEP 7 - BREVO
+===============================================================================
+
+   Brevo -> Security -> Authorised IPs -> turn the restriction OFF
+
+Render's outbound IP is not on your allowlist, so leaving this ON makes every
+reminder email fail with HTTP 401.
+
+Also confirm BREVO_SENDER_EMAIL appears under Brevo -> Senders as verified.
+
+
+===============================================================================
+ STEP 8 - CHECK IT WORKS
+===============================================================================
+
+   curl https://<service>.onrender.com/api/health/
+
+Expect HTTP 200 with mongo and redis reported as up.
+
+Worker log should end with:      celery@... ready.
+Cron job: click "Trigger Run" -> the log prints a summary like
+   {'vehicles_checked': 6, 'due': 5, 'sent': 5, 'failed': 0}
+
+
+===============================================================================
+ THREE RULES
+===============================================================================
+
+ 1. NEVER run  python manage.py migrate
+    This project uses MongoDB only. DATABASES is empty. migrate will fail.
+
+ 2. NEVER run  python manage.py collectstatic
+    There is no admin and no whitenoise. It is not needed.
+
+ 3. Run only ONE scheduler.
+    Use the Cron Job from step 4. Do not also run a Celery Beat service, or
+    every reminder email goes out twice.
+
+
+===============================================================================
+ COMMAND SUMMARY
+===============================================================================
+
+   Root Directory   backend
+   Build (all 3)    pip install -r requirements.txt
+   Web start        gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 3 --timeout 120 --access-logfile - --error-logfile -
+   Worker start     celery -A config worker --loglevel info --concurrency 2
+   Cron command     python manage.py shell -c "from reminders.tasks import daily_reminder_check; print(daily_reminder_check.apply().get())"
+   Cron schedule    30 3 * * *
+   Health check     /api/health/
+
+
+===============================================================================
+ IF SOMETHING BREAKS
+===============================================================================
+
+ Build fails, "requirements.txt not found"
+     Root Directory is not set to  backend
+
+ /api/health/ times out
+     Atlas Network Access is missing 0.0.0.0/0
+
+ Health check fails but the site loads
+     The path must be  /api/health/  WITH the trailing slash
+
+ 401 on every request right after logging in
+     AUTH_COOKIE_SECURE=True and AUTH_COOKIE_SAMESITE=None are missing
+
+ CORS error in the browser
+     CORS_ALLOWED_ORIGINS must exactly match the frontend URL,
+     with https:// and no trailing slash
+
+ No reminder emails
+     Check the cron job log. "0 due" means no document expires in exactly
+     7, 1 or 0 days today - that is correct behaviour, not a bug.
+
+ Reminder emails fail with HTTP 401
+     Brevo Authorised IPs is still switched on (step 7)
+
+ Adding a vehicle hangs forever
+     The Background Worker is not running, or web and worker have different
+     REDIS_URL values
+
+===============================================================================

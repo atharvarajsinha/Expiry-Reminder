@@ -1,0 +1,83 @@
+# Render blueprint: three services from one repository/image.
+#   web    -> Gunicorn
+#   worker -> Celery worker
+#   beat   -> Celery Beat
+#
+# MongoDB comes from MongoDB Atlas (set MONGODB_URI). Redis is a Render Key
+# Value instance, wired in below via fromService.
+services:
+  - type: web
+    name: vehicle-reminder-api
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    dockerCommand: ./entrypoint.sh web
+    healthCheckPath: /api/health/
+    envVars:
+      - key: DEBUG
+        value: "False"
+      - key: SECRET_KEY
+        generateValue: true
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: APP_USERNAME
+        sync: false
+      - key: APP_PASSWORD
+        sync: false
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DATABASE
+        value: vehicle_reminder
+      - key: FIREAPI_API_KEY
+        sync: false
+      - key: FIREAPI_API_KEY_HEADER
+        value: Authorization
+      - key: BREVO_API_KEY
+        sync: false
+      - key: BREVO_SENDER_EMAIL
+        sync: false
+      - key: REMINDER_EMAIL
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+      - key: TIME_ZONE
+        value: Asia/Kolkata
+      - key: AUTH_COOKIE_SECURE
+        value: "True"
+      - key: AUTH_COOKIE_SAMESITE
+        value: None
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: vehicle-reminder-redis
+          property: connectionString
+
+  - type: worker
+    name: vehicle-reminder-worker
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    dockerCommand: ./entrypoint.sh worker
+    envVars:
+      - fromGroup: vehicle-reminder-shared
+
+  - type: worker
+    name: vehicle-reminder-beat
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    dockerCommand: ./entrypoint.sh beat
+    envVars:
+      - fromGroup: vehicle-reminder-shared
+
+  - type: keyvalue
+    name: vehicle-reminder-redis
+    plan: starter
+    ipAllowList: []
+
+# Create an environment group named "vehicle-reminder-shared" in the Render
+# dashboard holding every variable from .env.example (MONGODB_URI, REDIS_URL,
+# APP_*, JWT_SECRET_KEY, FIREAPI_*, BREVO_*, REMINDER_EMAIL, TIME_ZONE ...)
+# and attach it to all three services so they stay in sync.

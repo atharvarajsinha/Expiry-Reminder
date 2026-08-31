@@ -1,0 +1,63 @@
+# Local development stack: MongoDB + Redis + web + worker + beat.
+# For production use MongoDB Atlas and a managed Redis instead of the two
+# containers below (just drop them and point .env at the managed URLs).
+
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  web:
+    build: .
+    command: ["web"]
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MONGODB_URI: mongodb://mongo:27017/
+      REDIS_URL: redis://redis:6379/0
+      PORT: "8000"
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mongo
+      - redis
+
+  worker:
+    build: .
+    command: ["worker"]
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MONGODB_URI: mongodb://mongo:27017/
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - mongo
+      - redis
+
+  beat:
+    build: .
+    command: ["beat"]
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MONGODB_URI: mongodb://mongo:27017/
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - redis
+
+volumes:
+  mongo_data:
+  redis_data:

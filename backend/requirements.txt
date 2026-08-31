@@ -1,0 +1,22 @@
+# --- Web framework -------------------------------------------------------
+Django~=5.2.0
+djangorestframework~=3.16.0
+django-cors-headers~=4.7.0
+gunicorn~=23.0.0
+
+# --- Authentication ------------------------------------------------------
+PyJWT~=2.10.0
+
+# --- MongoDB -------------------------------------------------------------
+pymongo~=4.10
+dnspython~=2.7.0          # required for mongodb+srv:// (MongoDB Atlas) URIs
+
+# --- Background processing ----------------------------------------------
+celery~=5.5.0
+redis~=5.2.0
+
+# --- HTTP client (FireAPI + Brevo transactional email API) --------------
+requests~=2.32.0
+
+# --- Configuration -------------------------------------------------------
+python-dotenv~=1.0
