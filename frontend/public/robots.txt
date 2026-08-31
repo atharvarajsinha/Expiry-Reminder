@@ -1,0 +1,3 @@
+# Personal authenticated application - nothing here should be indexed.
+User-agent: *
+Disallow: /
