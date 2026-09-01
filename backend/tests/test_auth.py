@@ -61,7 +61,7 @@ class TestLogin:
 
 class TestProtectedEndpoints:
     def test_without_token_is_unauthorized(self, api_client):
-        response = api_client.get("/api/vehicles/")
+        response = api_client.get("/api/items/")
 
         assert response.status_code == 401
         assert response.json()["error"]["code"] == "AUTHENTICATION_REQUIRED"
@@ -71,7 +71,7 @@ class TestProtectedEndpoints:
         client = api_client.__class__()
         client.credentials(HTTP_AUTHORIZATION="Bearer %s" % token)
 
-        response = client.get("/api/vehicles/")
+        response = client.get("/api/items/")
 
         assert response.status_code == 200
         assert response.json()["success"] is True
@@ -79,14 +79,14 @@ class TestProtectedEndpoints:
     def test_with_cookie_is_allowed(self, api_client):
         login(api_client)  # cookies are stored on the test client
 
-        response = api_client.get("/api/vehicles/")
+        response = api_client.get("/api/items/")
 
         assert response.status_code == 200
 
     def test_invalid_token_is_rejected(self, api_client):
         api_client.credentials(HTTP_AUTHORIZATION="Bearer not-a-real-token")
 
-        response = api_client.get("/api/vehicles/")
+        response = api_client.get("/api/items/")
 
         assert response.status_code == 401
         assert response.json()["error"]["code"] == "TOKEN_INVALID"
@@ -99,41 +99,33 @@ class TestProtectedEndpoints:
 
 
 class TestCsrf:
-    def test_cookie_auth_without_csrf_header_is_blocked(self, api_client):
+    def test_cookie_auth_without_csrf_header_is_blocked(self, api_client, vehicle_payload):
         login(api_client)
 
-        response = api_client.post(
-            "/api/vehicles/fetch/", {"vehicle_no": "UP25AK4922"}, format="json"
-        )
+        response = api_client.post("/api/items/", vehicle_payload, format="json")
 
         assert response.status_code == 403
         assert response.json()["error"]["code"] == "CSRF_FAILED"
 
-    def test_cookie_auth_with_wrong_csrf_header_is_blocked(self, api_client):
+    def test_cookie_auth_with_wrong_csrf_header_is_blocked(
+        self, api_client, vehicle_payload
+    ):
         login(api_client)
         api_client.credentials(HTTP_X_CSRF_TOKEN="some-other-value")
 
-        response = api_client.post(
-            "/api/vehicles/fetch/", {"vehicle_no": "UP25AK4922"}, format="json"
-        )
+        response = api_client.post("/api/items/", vehicle_payload, format="json")
 
         assert response.status_code == 403
         assert response.json()["error"]["code"] == "CSRF_FAILED"
 
-    def test_bearer_auth_does_not_require_csrf(self, api_client, monkeypatch):
-        from vehicles import tasks
-
-        monkeypatch.setattr(tasks.fetch_vehicle_details, "delay", lambda *a, **k: None)
-
+    def test_bearer_auth_does_not_require_csrf(self, api_client, vehicle_payload):
         token = login(api_client).json()["data"]["access"]
         client = api_client.__class__()
         client.credentials(HTTP_AUTHORIZATION="Bearer %s" % token)
 
-        response = client.post(
-            "/api/vehicles/fetch/", {"vehicle_no": "UP25AK4922"}, format="json"
-        )
+        response = client.post("/api/items/", vehicle_payload, format="json")
 
-        assert response.status_code == 202
+        assert response.status_code == 201
 
 
 class TestRefreshAndLogout:

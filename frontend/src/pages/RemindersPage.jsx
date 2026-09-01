@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { BellRing, CalendarClock, History, Mail, RefreshCw, Send } from 'lucide-react';
 
@@ -12,14 +12,18 @@ import {
   ReminderListSkeleton,
   UpcomingReminderList,
 } from '../components/reminders/ReminderList.jsx';
-import { getReminders, runReminderCheck } from '../api/reminders.js';
+import {
+  getReminders,
+  getUpcomingReminders,
+  runReminderCheck,
+} from '../api/reminders.js';
 import { getSettings } from '../api/settings.js';
-import { getVehicles } from '../api/vehicles.js';
 import { useOnlineStatus } from '../hooks/useOnlineStatus.js';
 import { useToast } from '../hooks/useToast.js';
 import { cn } from '../utils/cn.js';
+import { formatDateTime } from '../utils/date.js';
 import { ERROR_CODE, getApiError } from '../utils/errors.js';
-import { upcomingReminders } from '../utils/reminders.js';
+import { sweepSummaryMessage } from '../utils/reminders.js';
 
 const VIEWS = [
   { key: 'upcoming', label: 'Upcoming', icon: CalendarClock },
@@ -30,9 +34,8 @@ const VIEWS = [
  * What reminders are coming, and what has already gone out.
  *
  * Two different sources, deliberately kept apart:
- *  - **Upcoming** is derived on the client from each vehicle's expiry dates and
- *    the configured offsets, because the backend only writes a reminder record
- *    once the daily sweep claims it - there is nothing to read beforehand.
+ *  - **Upcoming** is the schedule, derived by the backend from every item's
+ *    dates and the configured offsets. It is what the check *will* send.
  *  - **History** is the real record from `GET /api/reminders/`, including
  *    delivery failures.
  */
@@ -42,7 +45,8 @@ export default function RemindersPage() {
 
   const [view, setView] = useState('upcoming');
   const [settings, setSettings] = useState(null);
-  const [vehicles, setVehicles] = useState([]);
+  const [upcoming, setUpcoming] = useState([]);
+  const [sweep, setSweep] = useState(null);
   const [history, setHistory] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isReloading, setIsReloading] = useState(false);
@@ -57,13 +61,14 @@ export default function RemindersPage() {
 
     try {
       // One round trip each, in parallel - none of them depends on the others.
-      const [nextSettings, nextVehicles, nextHistory] = await Promise.all([
+      const [nextSettings, nextUpcoming, nextHistory] = await Promise.all([
         getSettings(),
-        getVehicles(),
+        getUpcomingReminders(),
         getReminders({ limit: 50 }),
       ]);
       setSettings(nextSettings);
-      setVehicles(nextVehicles);
+      setUpcoming(nextUpcoming.upcoming);
+      setSweep(nextUpcoming.sweep);
       setHistory(nextHistory);
       setError(null);
     } catch (requestError) {
@@ -79,11 +84,6 @@ export default function RemindersPage() {
     load({ initial: true });
   }, [load]);
 
-  const upcoming = useMemo(
-    () => upcomingReminders(vehicles, settings?.reminders),
-    [vehicles, settings],
-  );
-
   const onRunNow = async () => {
     if (!isOnline) {
       toast.error("You're offline. Reconnect to run the reminder check.");
@@ -93,13 +93,13 @@ export default function RemindersPage() {
 
     setIsRunning(true);
     try {
-      await runReminderCheck();
-      toast.success(
-        'Reminder check queued. Any reminder due today will be emailed shortly.',
-      );
+      // The check runs synchronously now, so the response already says what
+      // went out - no waiting on a worker, and nothing to poll.
+      const summary = await runReminderCheck();
+      if (summary.failed) toast.error(sweepSummaryMessage(summary));
+      else toast.success(sweepSummaryMessage(summary));
       setIsConfirmOpen(false);
-      // The sweep runs in the worker; give it a moment before re-reading.
-      setTimeout(() => load(), 3000);
+      await load();
     } catch (requestError) {
       toast.error(getApiError(requestError).message);
     } finally {
@@ -107,6 +107,7 @@ export default function RemindersPage() {
     }
   };
 
+  const emailConfigured = settings?.delivery?.emailConfigured;
   const activeList = view === 'upcoming' ? upcoming : history;
 
   return (
@@ -143,18 +144,30 @@ export default function RemindersPage() {
       </header>
 
       {!isLoading && !error ? (
-        <div className="surface mb-5 flex flex-wrap items-center gap-x-2 gap-y-1 p-4 text-sm">
-          <Mail aria-hidden="true" className="h-4 w-4 shrink-0 text-slate-400" />
-          <span className="text-slate-500 dark:text-slate-400">Reminders are sent to</span>
-          <span className="font-medium text-slate-900 dark:text-white">
-            {settings?.reminderEmail || 'no address configured'}
-          </span>
-          <Link
-            to="/settings"
-            className="ml-auto font-medium text-primary-700 hover:underline dark:text-primary-300"
-          >
-            Change
-          </Link>
+        <div className="mb-5 space-y-3">
+          <div className="surface flex flex-wrap items-center gap-x-2 gap-y-1 p-4 text-sm">
+            <Mail aria-hidden="true" className="h-4 w-4 shrink-0 text-slate-400" />
+            <span className="text-slate-500 dark:text-slate-400">
+              Reminders are sent to
+            </span>
+            <span className="font-medium text-slate-900 dark:text-white">
+              {settings?.reminderEmail || 'no address configured'}
+            </span>
+            <Link
+              to="/settings"
+              className="ml-auto font-medium text-primary-700 hover:underline dark:text-primary-300"
+            >
+              Change
+            </Link>
+          </div>
+
+          {emailConfigured === false ? (
+            <Alert variant="warning" title="Email is not set up on the server">
+              The schedule below is still accurate and the app will keep showing
+              what is expiring - but nothing will be emailed until the mail
+              credentials are configured.
+            </Alert>
+          ) : null}
         </div>
       ) : null}
 
@@ -211,8 +224,11 @@ export default function RemindersPage() {
 
           {view === 'upcoming' ? (
             <p className="mb-3 text-xs text-slate-400 dark:text-slate-500">
-              Worked out from each vehicle&apos;s expiry dates and your reminder
-              settings. Expired documents are not reminded about again.
+              Worked out from each item&apos;s dates and your reminder settings.
+              Dates that have already passed are not reminded about again.
+              {sweep?.lastRunAt
+                ? ` Last check ran ${formatDateTime(sweep.lastRunAt)}.`
+                : ' No check has run yet.'}
             </p>
           ) : null}
 
@@ -221,11 +237,7 @@ export default function RemindersPage() {
               <EmptyState
                 icon={BellRing}
                 title="No reminders scheduled."
-                description={
-                  vehicles.length === 0
-                    ? 'Add a vehicle and its insurance and PUC expiry dates will be tracked here.'
-                    : 'Nothing is due before your documents expire. Check your reminder offsets in Settings.'
-                }
+                description="Add an item with a future expiry date, or widen the reminder offsets in Settings."
               />
             ) : (
               <EmptyState
@@ -235,7 +247,7 @@ export default function RemindersPage() {
               />
             )
           ) : view === 'upcoming' ? (
-            <UpcomingReminderList items={upcoming} />
+            <UpcomingReminderList entries={upcoming} />
           ) : (
             <ReminderHistoryList reminders={history} />
           )}
@@ -247,20 +259,17 @@ export default function RemindersPage() {
         onCancel={() => setIsConfirmOpen(false)}
         onConfirm={onRunNow}
         title="Send due reminders now?"
-        confirmLabel={isRunning ? 'Queueing...' : 'Send Now'}
+        confirmLabel={isRunning ? 'Sending...' : 'Send Now'}
         variant="primary"
         loading={isRunning}
       >
-        <p>
-          This runs the daily check immediately and emails any reminder that is due
-          today to:
-        </p>
+        <p>This runs the check immediately and emails anything due today to:</p>
         <p className="mt-2 font-medium text-slate-900 dark:text-white">
           {settings?.reminderEmail || 'the configured address'}
         </p>
         <Alert variant="info" className="mt-3">
-          Reminders that have already been sent are not sent again, so this is safe to
-          run more than once.
+          Reminders already sent are not sent again, so this is safe to run more
+          than once.
         </Alert>
       </ConfirmDialog>
     </>

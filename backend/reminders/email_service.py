@@ -3,6 +3,10 @@
 ``send_reminder_email`` renders the HTML/text templates and posts them to the
 Brevo API.  The API key lives in the environment, is sent only in the
 ``api-key`` request header and is never logged or returned by the API.
+
+This is the one outbound HTTP call the backend makes.  If email is not
+configured the sweep still runs and the in-app reminder list still works -- the
+send simply fails with :class:`EmailError` and is recorded for a retry.
 """
 
 from __future__ import annotations
@@ -15,10 +19,9 @@ from django.template.loader import render_to_string
 
 from core.dates import display_date
 from core.errors import ApiError, ErrorCode
+from items import categories
 
 logger = logging.getLogger(__name__)
-
-DOCUMENT_LABELS = {"insurance": "Insurance", "pucc": "PUC"}
 
 
 class EmailError(ApiError):
@@ -41,68 +44,69 @@ def _require_configuration(recipient):
         )
 
 
-def build_subject(vehicle_no, document_type, days_remaining):
-    label = DOCUMENT_LABELS.get(document_type, document_type.title())
+def urgency_phrase(days_remaining):
     if days_remaining == 0:
-        window = "expires today"
-    elif days_remaining == 1:
-        window = "expires tomorrow"
-    elif days_remaining is not None and days_remaining > 1:
-        window = "expires in %d days" % days_remaining
-    else:
-        window = "has expired"
-    return "Vehicle %s %s %s" % (vehicle_no, label, window)
+        return "expires today"
+    if days_remaining == 1:
+        return "expires tomorrow"
+    if days_remaining is not None and days_remaining > 1:
+        return "expires in %d days" % days_remaining
+    return "has expired"
 
 
-def build_context(vehicle, document_type, expiry_date, days_remaining):
-    """Everything the email templates need, already humanised."""
-    block = vehicle.get(document_type) or {}
-    label = DOCUMENT_LABELS.get(document_type, document_type.title())
-
-    if days_remaining == 0:
-        urgency = "expires today"
-    elif days_remaining == 1:
-        urgency = "expires tomorrow"
-    else:
-        urgency = "expires in %d days" % days_remaining
-
-    maker_model = " ".join(
-        part for part in [vehicle.get("maker"), vehicle.get("model")] if part
+def build_subject(item, entry):
+    """e.g. ``Passport (Valid until) expires in 7 days``."""
+    name = item.get("name") or categories.category_label(item.get("category"))
+    return "%s -- %s %s" % (
+        name,
+        entry["expiry_label"],
+        urgency_phrase(entry["days_remaining"]),
     )
 
+
+def build_context(item, entry):
+    """Everything the email templates need, already humanised."""
+    identifier = item.get("identifier")
+    category_key = item.get("category")
+
+    # A card identifier is four digits; showing it as ****4321 makes clear
+    # which card is meant without implying more was stored.
+    if identifier and categories.is_card(category_key):
+        identifier = "**** %s" % identifier
+
     return {
-        "vehicle_no": vehicle.get("vehicle_no"),
-        "maker_model": maker_model or "Not available",
-        "document_label": label,
-        "document_type": document_type,
-        "company": block.get("company"),
-        "reference_label": "Policy Number" if document_type == "insurance" else "Certificate Number",
-        "reference_no": block.get("policy_no") or block.get("certificate_no"),
-        "expiry_date": display_date(expiry_date),
-        "days_remaining": days_remaining,
-        "urgency": urgency,
+        "item_name": item.get("name"),
+        "category_label": categories.category_label(category_key),
+        "identifier": identifier,
+        "issuer": item.get("issuer"),
+        "holder": item.get("holder"),
+        "expiry_label": entry["expiry_label"],
+        "reference": entry.get("reference"),
+        "expiry_date": display_date(entry["expiry_date"]),
+        "days_remaining": entry["days_remaining"],
+        "urgency": urgency_phrase(entry["days_remaining"]),
         "frontend_url": settings.FRONTEND_URL,
     }
 
 
-def send_reminder_email(vehicle, document_type, expiry_date, days_remaining, recipient):
-    """Send one reminder through Brevo.  Returns the Brevo message id."""
+def send_reminder_email(item, entry, recipient):
+    """Send one reminder through Brevo.  Returns the Brevo message id.
+
+    ``entry`` is one element of :func:`reminders.services.due_reminders`.
+    """
     _require_configuration(recipient)
 
-    context = build_context(vehicle, document_type, expiry_date, days_remaining)
-    subject = build_subject(
-        vehicle.get("vehicle_no"), document_type, days_remaining
-    )
+    context = build_context(item, entry)
     payload = {
         "sender": {
             "name": settings.BREVO_SENDER_NAME,
             "email": settings.BREVO_SENDER_EMAIL,
         },
         "to": [{"email": recipient}],
-        "subject": subject,
+        "subject": build_subject(item, entry),
         "htmlContent": render_to_string("emails/reminder.html", context),
         "textContent": render_to_string("emails/reminder.txt", context),
-        "tags": ["vehicle-reminder", document_type],
+        "tags": ["expiry-reminder", item.get("category") or "other"],
     }
 
     headers = {
@@ -150,9 +154,9 @@ def send_reminder_email(vehicle, document_type, expiry_date, days_remaining, rec
         message_id = None
 
     logger.info(
-        "Reminder email sent for vehicle %s (%s, %s day(s) remaining)",
-        vehicle.get("vehicle_no"),
-        document_type,
-        days_remaining,
+        "Reminder email sent for item %s (%s, %s day(s) remaining)",
+        item.get("_id"),
+        entry["expiry_key"],
+        entry["days_remaining"],
     )
     return message_id

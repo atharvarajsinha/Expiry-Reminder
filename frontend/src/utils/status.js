@@ -1,11 +1,10 @@
 /**
- * Document expiry status.
+ * Expiry status.
  *
  * The backend already computes `status`, `status_label` and `days_remaining`
- * for every document and it is the source of truth (it uses the project
+ * for every expiry date and it is the source of truth (it uses the project
  * timezone, Asia/Kolkata by default). These helpers prefer the server values
- * and only fall back to a local calculation when a field is missing, so a
- * summary payload and a detail payload always render the same badge.
+ * and only fall back to a local calculation when a field is missing.
  */
 import { AlertTriangle, CheckCircle2, Clock, HelpCircle, XCircle } from 'lucide-react';
 
@@ -95,24 +94,24 @@ export function statusFromDays(days) {
 }
 
 /**
- * Normalises one document block into everything a badge needs.
+ * Normalises one expiry into everything a badge needs.
  * Accepts the mapped shape `{ expiresOn, status, statusLabel, daysRemaining }`.
  */
-export function resolveDocumentStatus(document) {
-  const expiresOn = document?.expiresOn ?? null;
+export function resolveExpiryStatus(expiry) {
+  const expiresOn = expiry?.expiresOn ?? null;
   const daysRemaining =
-    document?.daysRemaining === null || document?.daysRemaining === undefined
+    expiry?.daysRemaining === null || expiry?.daysRemaining === undefined
       ? daysUntil(expiresOn)
-      : document.daysRemaining;
+      : expiry.daysRemaining;
 
   const status =
-    document?.status && STATUS_META[document.status]
-      ? document.status
+    expiry?.status && STATUS_META[expiry.status]
+      ? expiry.status
       : statusFromDays(daysRemaining);
 
   return {
     status,
-    label: document?.statusLabel || statusMeta(status).label,
+    label: expiry?.statusLabel || statusMeta(status).label,
     daysRemaining,
     expiresOn,
     meta: statusMeta(status),
@@ -129,21 +128,26 @@ export function worstStatus(statuses) {
 }
 
 /**
- * Dashboard counters. These count *documents* (insurance + PUC for every
- * vehicle) rather than vehicles, which is what the summary cards report.
+ * Dashboard counters.
+ *
+ * `items` counts things you own; the other three count *dates*, because one
+ * item can carry several (a vehicle with insurance, PUC and fitness is one
+ * item and three dates). "Expires today" is counted with "expired" - both need
+ * acting on now, and splitting them would give the dashboard a fifth number
+ * that is almost always zero.
  */
-export function summarizeDocuments(vehicles) {
+export function summarizeItems(items) {
   const counts = {
-    vehicles: vehicles.length,
+    items: items.length,
     valid: 0,
     expiringSoon: 0,
     expired: 0,
     unknown: 0,
   };
 
-  for (const vehicle of vehicles) {
-    for (const document of [vehicle.insurance, vehicle.pucc]) {
-      const { status } = resolveDocumentStatus(document);
+  for (const item of items) {
+    for (const expiry of item.expiries || []) {
+      const { status } = resolveExpiryStatus(expiry);
       if (status === STATUS.VALID) counts.valid += 1;
       else if (status === STATUS.EXPIRING_SOON) counts.expiringSoon += 1;
       else if (status === STATUS.EXPIRES_TODAY || status === STATUS.EXPIRED) {
@@ -153,4 +157,12 @@ export function summarizeDocuments(vehicles) {
   }
 
   return counts;
+}
+
+/** True when an item needs attention today - expired, or expiring now. */
+export function needsAttention(item) {
+  return (
+    item.overallStatus === STATUS.EXPIRED ||
+    item.overallStatus === STATUS.EXPIRES_TODAY
+  );
 }

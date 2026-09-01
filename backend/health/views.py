@@ -1,8 +1,8 @@
 """``GET /api/health/`` -- the one public endpoint.
 
 Returns ``503`` when MongoDB is unreachable so platform health checks (Render,
-Railway, uptime monitors) react correctly.  Worker/scheduler status is
-included when ``?workers=1`` is passed (it costs a broker round trip).
+Railway, uptime monitors) react correctly.  There is no worker or broker to
+report on; ``?sweep=1`` adds when the daily reminder sweep last ran.
 """
 
 from __future__ import annotations
@@ -20,28 +20,15 @@ from core.dates import iso_datetime, now_utc
 logger = logging.getLogger(__name__)
 
 
-def _worker_status(timeout=1.0):
-    """Ask the broker which workers answer.  Never raises."""
+def _sweep_status():
+    """When the reminder sweep last ran.  Never raises."""
     try:
-        from config.celery import app as celery_app
+        from reminders.services import sweep_state
 
-        replies = celery_app.control.ping(timeout=timeout) or []
-        names = [name for reply in replies for name in reply.keys()]
-        scheduled = celery_app.conf.beat_schedule or {}
-        return {
-            "broker": "connected" if replies else "unknown",
-            "workers_online": len(names),
-            "workers": names,
-            "scheduled_tasks": sorted(scheduled.keys()),
-        }
+        return sweep_state()
     except Exception as exc:
-        logger.warning("Worker health check failed: %s", exc.__class__.__name__)
-        return {
-            "broker": "disconnected",
-            "workers_online": 0,
-            "workers": [],
-            "scheduled_tasks": [],
-        }
+        logger.warning("Sweep status unavailable: %s", exc.__class__.__name__)
+        return {"last_run_date": None, "last_run_at": None}
 
 
 class HealthView(APIView):
@@ -59,8 +46,8 @@ class HealthView(APIView):
             "timezone": settings.TIME_ZONE,
         }
 
-        if request.query_params.get("workers") in ("1", "true", "yes"):
-            payload["celery"] = _worker_status()
+        if request.query_params.get("sweep") in ("1", "true", "yes"):
+            payload["sweep"] = _sweep_status()
 
         status_code = 200 if database_ok else 503
         # Health checks are intentionally *not* wrapped in the success/error

@@ -12,14 +12,13 @@ import { ToastProvider } from './context/ToastContext.jsx';
 
 /**
  * Routes are code-split: the login page is all a signed-out visitor downloads,
- * and the vehicle detail and settings screens arrive only when visited.
+ * and the item detail and settings screens arrive only when visited.
  */
 const Login = lazy(() => import('./pages/Login.jsx'));
 const Dashboard = lazy(() => import('./pages/Dashboard.jsx'));
-const VehiclesPage = lazy(() => import('./pages/VehiclesPage.jsx'));
-const VehicleDetailsPage = lazy(() => import('./pages/VehicleDetailsPage.jsx'));
+const ItemsPage = lazy(() => import('./pages/ItemsPage.jsx'));
+const ItemDetailsPage = lazy(() => import('./pages/ItemDetailsPage.jsx'));
 const RemindersPage = lazy(() => import('./pages/RemindersPage.jsx'));
-const JobsPage = lazy(() => import('./pages/JobsPage.jsx'));
 const Settings = lazy(() => import('./pages/Settings.jsx'));
 const NotFound = lazy(() => import('./pages/NotFound.jsx'));
 
@@ -38,10 +37,9 @@ export default function App() {
                 <Route element={<ProtectedRoute />}>
                   <Route element={<AppLayout />}>
                     <Route path="/dashboard" element={<Dashboard />} />
-                    <Route path="/vehicles" element={<VehiclesPage />} />
-                    <Route path="/vehicles/:id" element={<VehicleDetailsPage />} />
+                    <Route path="/items" element={<ItemsPage />} />
+                    <Route path="/items/:id" element={<ItemDetailsPage />} />
                     <Route path="/reminders" element={<RemindersPage />} />
-                    <Route path="/jobs" element={<JobsPage />} />
                     <Route path="/settings" element={<Settings />} />
                     <Route path="*" element={<NotFound />} />
                   </Route>

@@ -1,170 +1,80 @@
 [
   {
-    "vehicle_no": "UP25AK4922",
-    "registration_date": "2019-03-14",
-    "insurance": {
-      "company": "National Insurance Company Ltd",
-      "policy_no": "26020131266730212340",
-      "expires_on": "2026-09-07"
-    },
-    "pucc": {
-      "certificate_no": "UP02500590046455",
-      "expires_on": "2026-10-15"
-    },
-    "vehicle_category": "2WN",
-    "vehicle_class": "M-Cycle/Scooter(2WN)",
-    "chassis_no": "ME4JC565HKT004221",
-    "engine_no": "JC56ET1004553",
-    "cubic_capacity": 109.51,
-    "maker": "HONDA MOTORCYCLE AND SCOOTER INDIA PVT LTD",
-    "model": "CB TWISTER",
-    "owner_name": "ATHARVA SINHA",
-    "father_name": "RAJESH SINHA",
-    "fuel": "PETROL",
-    "wheelbase": 1258.0,
-    "seat_capacity": 2,
-    "registered_at": "RTO BAREILLY, UTTAR PRADESH",
-    "fitness_upto": "2034-03-13",
-    "tax_upto": "2034-03-13"
+    "category": "vehicle",
+    "name": "Honda CB Twister",
+    "identifier": "UP25AK4922",
+    "issuer": "National Insurance Company Ltd",
+    "holder": "Atharva Sinha",
+    "notes": "RTO Bareilly, Uttar Pradesh",
+    "expiries": [
+      {
+        "key": "insurance",
+        "expires_on": "+21",
+        "reference": "26020131266730212340"
+      },
+      {
+        "key": "pucc",
+        "expires_on": "+60",
+        "reference": "UP02500590046455"
+      },
+      { "key": "fitness", "expires_on": "+2000" }
+    ]
   },
   {
-    "vehicle_no": "DL8CAF5030",
-    "registration_date": "2020-07-22",
-    "insurance": {
-      "company": "ICICI Lombard General Insurance Co Ltd",
-      "policy_no": "3005/K/2210457/00/000",
-      "expires_on": "2026-09-01"
-    },
-    "pucc": {
-      "certificate_no": "DL10250071122334",
-      "expires_on": "2026-08-31"
-    },
-    "vehicle_category": "LMV",
-    "vehicle_class": "Motor Car(LMV)",
-    "chassis_no": "MA3EJKD1S00341278",
-    "engine_no": "K12MN1234567",
-    "cubic_capacity": 1197.0,
-    "maker": "MARUTI SUZUKI INDIA LTD",
-    "model": "SWIFT VXI",
-    "owner_name": "PRIYA VERMA",
-    "father_name": "SURESH VERMA",
-    "fuel": "PETROL",
-    "wheelbase": 2450.0,
-    "seat_capacity": 5,
-    "registered_at": "RTO SOUTH WEST, DELHI",
-    "fitness_upto": "2035-07-21",
-    "tax_upto": "2030-07-21"
+    "category": "credit_card",
+    "name": "HDFC Millennia",
+    "identifier": "4321",
+    "issuer": "HDFC Bank",
+    "holder": "Atharva Sinha",
+    "expiries": [
+      { "key": "card_expiry", "expires_on": "+400" },
+      { "key": "annual_fee", "expires_on": "+7", "reference": "1000 + GST" }
+    ]
   },
   {
-    "vehicle_no": "MH12AB1234",
-    "registration_date": "2018-11-05",
-    "insurance": {
-      "company": "HDFC ERGO General Insurance Co Ltd",
-      "policy_no": "2311204567890123",
-      "expires_on": "2026-08-31"
-    },
-    "pucc": {
-      "certificate_no": "MH12250088776655",
-      "expires_on": "2027-02-27"
-    },
-    "vehicle_category": "LMV",
-    "vehicle_class": "Motor Car(LMV)",
-    "chassis_no": "MAT621034LPB12345",
-    "engine_no": "27DT9812345",
-    "cubic_capacity": 1497.0,
-    "maker": "TATA MOTORS LTD",
-    "model": "NEXON XZ PLUS",
-    "owner_name": "ROHIT DESHMUKH",
-    "father_name": "ANIL DESHMUKH",
-    "fuel": "DIESEL",
-    "wheelbase": 2498.0,
-    "seat_capacity": 5,
-    "registered_at": "RTO PUNE, MAHARASHTRA",
-    "fitness_upto": "2033-11-04",
-    "tax_upto": "2028-11-04"
+    "category": "debit_card",
+    "name": "SBI Classic",
+    "identifier": "8890",
+    "issuer": "State Bank of India",
+    "expiries": [{ "key": "card_expiry", "expires_on": "+900" }]
   },
   {
-    "vehicle_no": "KA05MN7788",
-    "registration_date": "2022-01-18",
-    "insurance": {
-      "company": "Bajaj Allianz General Insurance Co Ltd",
-      "policy_no": "OG-27-1102-1801-00012345",
-      "expires_on": "2027-01-20"
-    },
-    "pucc": {
-      "certificate_no": "KA05250033445566",
-      "expires_on": "2026-11-30"
-    },
-    "vehicle_category": "LMV",
-    "vehicle_class": "Motor Car(LMV)",
-    "chassis_no": "MALBM51CLLM123456",
-    "engine_no": "G4LAKM123456",
-    "cubic_capacity": 1197.0,
-    "maker": "HYUNDAI MOTOR INDIA LTD",
-    "model": "GRAND I10 NIOS SPORTZ",
-    "owner_name": "MEERA IYER",
-    "father_name": "KRISHNAN IYER",
-    "fuel": "PETROL",
-    "wheelbase": 2450.0,
-    "seat_capacity": 5,
-    "registered_at": "RTO JAYANAGAR, KARNATAKA",
-    "fitness_upto": "2037-01-17",
-    "tax_upto": "2032-01-17"
+    "category": "document",
+    "name": "Passport",
+    "identifier": "M1234567",
+    "issuer": "Regional Passport Office, Lucknow",
+    "holder": "Atharva Sinha",
+    "expiries": [{ "key": "valid_until", "expires_on": "+180" }]
   },
   {
-    "vehicle_no": "TN22BZ9001",
-    "registration_date": "2017-06-30",
-    "insurance": {
-      "company": "The New India Assurance Co Ltd",
-      "policy_no": "71010031210100004567",
-      "expires_on": "2026-08-11"
-    },
-    "pucc": {
-      "certificate_no": "TN22250099001122",
-      "expires_on": "2026-09-07"
-    },
-    "vehicle_category": "2WN",
-    "vehicle_class": "M-Cycle/Scooter(2WN)",
-    "chassis_no": "MD626BE57H1A12345",
-    "engine_no": "JE57AH1234567",
-    "cubic_capacity": 124.7,
-    "maker": "BAJAJ AUTO LTD",
-    "model": "PULSAR 125",
-    "owner_name": "KARTHIK RAMAN",
-    "father_name": "RAMAN NATARAJAN",
-    "fuel": "PETROL",
-    "wheelbase": 1320.0,
-    "seat_capacity": 2,
-    "registered_at": "RTO CHENNAI CENTRAL, TAMIL NADU",
-    "fitness_upto": "2032-06-29",
-    "tax_upto": "2032-06-29"
+    "category": "document",
+    "name": "Driving licence",
+    "identifier": "UP2520190001234",
+    "issuer": "RTO Bareilly",
+    "expiries": [{ "key": "valid_until", "expires_on": "-5" }]
   },
   {
-    "vehicle_no": "RJ14CD3456",
-    "registration_date": "2021-09-09",
-    "insurance": {
-      "company": null,
-      "policy_no": null,
-      "expires_on": null
-    },
-    "pucc": {
-      "certificate_no": "RJ14250055667788",
-      "expires_on": "2026-09-25"
-    },
-    "vehicle_category": "LMV",
-    "vehicle_class": "Motor Car(LMV)",
-    "chassis_no": "MA1TA2RBXM1A12345",
-    "engine_no": "H4DE12M123456",
-    "cubic_capacity": 999.0,
-    "maker": "RENAULT INDIA PVT LTD",
-    "model": "KWID RXT",
-    "owner_name": "SANJAY GUPTA",
-    "father_name": "MAHESH GUPTA",
-    "fuel": "PETROL",
-    "wheelbase": 2422.0,
-    "seat_capacity": 5,
-    "registered_at": "RTO JAIPUR, RAJASTHAN",
-    "fitness_upto": "2036-09-08",
-    "tax_upto": "2031-09-08"
+    "category": "insurance",
+    "name": "Family health cover",
+    "identifier": "POL-2291045",
+    "issuer": "Star Health",
+    "expiries": [
+      { "key": "policy", "expires_on": "+30" },
+      { "key": "premium", "expires_on": "+1", "reference": "24500" }
+    ]
+  },
+  {
+    "category": "subscription",
+    "name": "example.com domain",
+    "identifier": "example.com",
+    "issuer": "Namecheap",
+    "expiries": [{ "key": "renewal", "expires_on": "+45" }]
+  },
+  {
+    "category": "warranty",
+    "name": "Washing machine",
+    "identifier": "SN-88213",
+    "issuer": "LG",
+    "expiries": [{ "key": "warranty", "expires_on": "+120", "reference": "INV-99213" }]
   }
 ]

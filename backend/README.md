@@ -1,15 +1,14 @@
-# Vehicle Document Reminder — Backend
+# Expiry Reminders — Backend
 
-A small, production-ready backend for a **personal** vehicle document reminder app.
-It pulls RC/insurance/PUC data from FireAPI, stores it in MongoDB, and emails you
-through Brevo before your insurance or PUC expires.
+A single-user Django + MongoDB API that tracks anything with an expiry date —
+vehicle papers, passports, debit and credit cards, insurance policies,
+subscriptions, warranties — and emails you before each one lapses.
 
-* Python 3.12+ · Django 5 · Django REST Framework
-* MongoDB (Atlas compatible) — the **only** application database
-* Celery worker + Celery Beat, Redis broker
-* Brevo transactional email
-* JWT authentication for one user, stored in **HttpOnly cookies**
-* Gunicorn, Docker, Render/Railway ready
+Everything is entered by hand. There is no external data provider, and nothing
+is looked up anywhere.
+
+**There is also no broker, no worker and no scheduler.** One web process is the
+entire backend. How that works is [§4](#4-how-reminders-happen).
 
 ---
 
@@ -18,916 +17,429 @@ through Brevo before your insurance or PUC expires.
 1. [Architecture](#1-architecture)
 2. [Project structure](#2-project-structure)
 3. [MongoDB documents](#3-mongodb-documents)
-4. [Flows](#4-flows)
+4. [How reminders happen](#4-how-reminders-happen)
 5. [Local development](#5-local-development)
 6. [Environment variables](#6-environment-variables)
 7. [API reference](#7-api-reference)
 8. [Frontend integration (cookies + CSRF)](#8-frontend-integration-cookies--csrf)
 9. [Tests](#9-tests)
 10. [Docker](#10-docker)
-11. [Deploying to Render](#11-deploying-to-render)
-12. [Deploying to Railway](#12-deploying-to-railway)
-13. [Security notes](#13-security-notes)
-14. [Command cheat sheet](#14-command-cheat-sheet)
+11. [Deploying](#11-deploying)
 
 ---
 
 ## 1. Architecture
 
-Simple and monolithic — one Django project, three processes.
-
 ```
-                       ┌──────────────────────┐
-  React frontend  ───▶ │  Django + DRF (web)  │ ──▶ MongoDB Atlas
-   (cookies)           │  gunicorn            │ ──▶ Redis (queue)
-                       └──────────┬───────────┘
-                                  │ enqueue
-                       ┌──────────▼───────────┐
-                       │  Celery worker       │ ──▶ FireAPI  ──▶ MongoDB
-                       └──────────────────────┘ ──▶ Brevo
-                       ┌──────────────────────┐
-                       │  Celery Beat 09:00   │ ──▶ daily_reminder_check
-                       └──────────────────────┘
+        Browser (React PWA)
+               │  cookies + X-CSRF-Token
+               ▼
+        ┌──────────────────┐
+        │  Django + DRF    │──── Brevo API (the one outbound call)
+        │  1 web process   │
+        └──────────────────┘
+               │
+               ▼
+           MongoDB
 ```
 
-Key decisions:
+Deliberate choices, and why:
 
-* **No Django ORM.** `DATABASES = {}`, no migrations, no SQLite file, and
-  `django.contrib.auth` / `sessions` / `admin` are not installed. MongoDB is
-  reached with `pymongo` through a thin service layer (`core/mongo.py` plus
-  `*/services.py`). This avoids the reliability problems of MongoDB-on-Django-ORM
-  adapters.
-* **Nothing slow happens in a request.** FireAPI calls only ever run inside a
-  Celery task; the API creates a job and returns `202 Accepted`.
-* **Reminders are idempotent** thanks to a unique compound index on the
-  reminders collection — running the daily task twice can never send a
-  duplicate email.
-* **One user, no user table.** Credentials come from `APP_USERNAME` /
-  `APP_PASSWORD` and are never stored in MongoDB.
+| Choice | Reason |
+| --- | --- |
+| **No Django ORM.** `DATABASES` is empty; there are no migrations, no `admin`, no `sessions`. | MongoDB is the only store. Half an ORM pointed at nothing is worse than none. |
+| **No Celery, no Redis.** | The only recurring job was "check once a day". A broker, a worker and a scheduler are three more processes to pay for and keep alive for one daily loop — so the loop rides on a request instead ([§4](#4-how-reminders-happen)). |
+| **No user table.** One username and password live in the environment; sessions are stateless JWTs. | It is a personal app. A user table would be one row forever. |
+| **Card numbers are refused, not truncated.** | Only the last four digits are ever accepted. Trimming a submitted PAN server-side would mean the full number had already crossed the wire and the logs. See `core/validators.py`. |
+| **One `items` collection, typed by `category`.** | A passport and a car differ in their labels, not their shape: both are a name, an identifier and a list of dates. Adding a category is one entry in `items/categories.py`. |
+
+---
 
 ## 2. Project structure
 
-```text
-backend/
-├── manage.py
-├── requirements.txt          # runtime dependencies
-├── requirements-dev.txt      # + test dependencies
-├── Dockerfile
-├── entrypoint.sh             # web | worker | beat role selector
-├── docker-compose.yml        # local mongo + redis + 3 app processes
-├── render.yaml               # Render blueprint (web + worker + beat + redis)
-├── railway.json              # Railway service definition
-├── pytest.ini
-├── pytest_bootstrap.py       # test env (loaded before Django settings)
-├── conftest.py               # shared fixtures (mongomock, auth client, ...)
-├── .env.example
-├── .gitignore
-├── README.md
-│
-├── config/                   # Django project
-│   ├── settings.py           # all configuration, env driven
-│   ├── urls.py
-│   ├── celery.py             # Celery app + Beat schedule
-│   ├── wsgi.py
-│   └── asgi.py
-│
-├── core/                     # shared building blocks
-│   ├── mongo.py              # client, collections, indexes, ping
-│   ├── dates.py              # parsing, storage conversion, expiry status
-│   ├── validators.py         # vehicle number normalisation/validation
-│   ├── errors.py             # ErrorCode + ApiError
-│   ├── exception_handler.py  # consistent JSON error envelope
-│   ├── responses.py          # success()/failure() helpers
-│   ├── middleware.py         # security headers + request log
-│   └── logging.py            # secret scrubbing log filter
-│
-├── authentication/           # login/refresh/logout/me
-│   ├── jwt_service.py        # token issue/verify, credential check
-│   ├── cookies.py            # HttpOnly cookie storage + CSRF helpers
-│   ├── authentication.py     # DRF CookieJWTAuthentication
-│   ├── serializers.py · views.py · urls.py
-│
-├── vehicles/
-│   ├── fireapi.py            # FireAPI HTTP client + error mapping
-│   ├── normalizers.py        # rc_* -> application fields, refresh merge
-│   ├── services.py           # MongoDB access + API serialisation
-│   ├── tasks.py              # fetch_vehicle_details Celery task
-│   ├── serializers.py · views.py · urls.py · apps.py
-│
-├── jobs/                     # job records + polling endpoint
-│   ├── services.py · views.py · urls.py
-│
-├── reminders/
-│   ├── services.py           # due calculation, claim/dedupe, daily sweep
-│   ├── email_service.py      # Brevo API integration
-│   ├── tasks.py              # daily_reminder_check (Celery Beat)
-│   ├── views.py · urls.py
-│   └── templates/emails/reminder.html · reminder.txt
-│
-├── appsettings/              # GET/PUT /api/settings/
-│   ├── services.py · serializers.py · views.py · urls.py
-│
-├── health/                   # public GET /api/health/
-│   └── views.py · urls.py
-│
-└── tests/
-    ├── test_auth.py · test_vehicles.py · test_jobs.py
-    ├── test_reminders.py · test_settings_api.py
-    ├── test_core.py · test_health.py
 ```
+backend/
+├── config/            settings, urls, wsgi/asgi   (no celery.py — by design)
+├── core/
+│   ├── dates.py       parsing, storage conversion, expiry status
+│   ├── errors.py      ApiError + the stable error codes
+│   ├── middleware.py  security headers, request log, ReminderSweepMiddleware
+│   ├── mongo.py       client, collections, indexes
+│   ├── responses.py   the {success, data} / {success, error} envelope
+│   └── validators.py  plate normalisation, the card-number guard
+├── authentication/    login/refresh/logout/me, cookie JWT + double-submit CSRF
+├── items/
+│   ├── categories.py  the catalogue: labels, expiry presets, card flags
+│   ├── services.py    validation, persistence, serialisation
+│   └── management/commands/seed_items.py
+├── reminders/
+│   ├── services.py    the engine: derive, claim, sweep
+│   └── email_service.py   Brevo
+├── appsettings/       recipient address + per-category offsets
+├── health/            the one public endpoint
+└── tests/
+```
+
+---
 
 ## 3. MongoDB documents
 
-Database: `MONGODB_DATABASE` (default `vehicle_reminder`). Four collections.
+### `items`
 
-### `vehicles` — unique index on `vehicle_no`
-
-```json
-{
-  "_id": "ObjectId(...)",
-  "vehicle_no": "UP25AK4922",
-  "registration_date": "2010-12-14T00:00:00Z",
-  "insurance": {
-    "company": "National Insurance Company Ltd",
-    "policy_no": "26020131266730212340",
-    "expires_on": "2027-08-12T00:00:00Z"
-  },
-  "vehicle_category": "2W",
-  "vehicle_class": null,
-  "chassis_no": "JC47E0133748",
-  "engine_no": "ME4JC472LA8086146",
-  "cubic_capacity": 50.0,
-  "maker": "HONDA",
-  "model": "CB TWISTER",
-  "owner_name": "ROHIT SRIVASTAVA",
-  "father_name": null,
-  "fuel": "PETROL",
-  "wheelbase": null,
-  "seat_capacity": 2,
-  "pucc": {
-    "certificate_no": "UP02500590046455",
-    "expires_on": "2027-02-22T00:00:00Z"
-  },
-  "registered_at": "UP25, RTO",
-  "fitness_upto": null,
-  "tax_upto": null,
-  "created_at": "2026-08-31T09:00:00Z",
-  "updated_at": "2026-08-31T09:00:00Z",
-  "last_fetched_at": "2026-08-31T09:00:00Z"
-}
-```
-
-Dates are stored as real BSON datetimes (midnight UTC), never as the assorted
-FireAPI string formats (`14/12/2010`, `2027-08-12`, `30-Aug-2026` …).
-
-### `jobs` — unique index on `job_id`
+Indexed on `category`, `(category, identifier_key)`, `created_at`,
+`next_expiry_on`.
 
 ```json
 {
-  "job_id": "8f14e45fceea167a5a36dedd4bea2543",
-  "job_type": "fetch_vehicle",       // or "refresh_vehicle"
-  "vehicle_no": "UP25AK4922",
-  "vehicle_id": "652f...",           // set when completed
-  "status": "queued",                // queued | processing | completed | failed
-  "error": null,                     // user-safe message
-  "error_code": null,                // e.g. VEHICLE_API_TIMEOUT
-  "created_at": "...", "started_at": null, "completed_at": null
-}
-```
-
-No API keys, headers or credentials are ever written to a job.
-
-### `reminders` — unique index on `(vehicle_id, document_type, expiry_date, reminder_type)`
-
-```json
-{
-  "vehicle_id": "652f...",
-  "document_type": "insurance",      // insurance | pucc
-  "expiry_date": "2027-08-12T00:00:00Z",
-  "reminder_type": "7_days",         // 7_days | 1_day | expiry_day
-  "scheduled_for": "2027-08-05T00:00:00Z",
-  "sent": true,
-  "sent_at": "2027-08-05T03:30:00Z",
-  "attempts": 1,
-  "last_error": null,
-  "message_id": "<brevo-message-id>",
-  "created_at": "..."
-}
-```
-
-### `settings` — single document `_id: "app_settings"`
-
-```json
-{
-  "_id": "app_settings",
-  "reminder_email": "example@gmail.com",
-  "reminders": { "insurance": [7, 1, 0], "pucc": [7, 1, 0] },
+  "category": "vehicle",
+  "name": "Honda CB Twister",
+  "identifier": "UP25AK4922",
+  "identifier_key": "up25ak4922",
+  "issuer": "National Insurance Company Ltd",
+  "holder": "Rohit",
+  "notes": null,
+  "expiries": [
+    {
+      "key": "insurance",
+      "label": "Insurance",
+      "expires_on": "2027-08-12T00:00:00Z",
+      "issued_on": null,
+      "reference": "26020131266730212340"
+    }
+  ],
+  "next_expiry_on": "2027-08-12T00:00:00Z",
+  "created_at": "...",
   "updated_at": "..."
 }
 ```
 
-## 4. Flows
+- `identifier_key` is the lower-cased, space-stripped identifier. Duplicates are
+  detected against it, so `up25 ak 4922` and `UP25AK4922` are the same vehicle.
+  It is scoped to the category — a credit card and a debit card may both end
+  `4321`.
+- `expiries` is sorted soonest-first on save, and `next_expiry_on` denormalises
+  the first entry so the sweep and the list query can use an index instead of
+  loading everything and sorting in Python.
+- Dates are stored as BSON datetimes pinned to **midnight UTC**. All expiry
+  arithmetic happens on `date` objects in `TIME_ZONE` (default `Asia/Kolkata`),
+  so "7 days before" lands on the right calendar day whatever the server clock
+  is set to.
 
-### Background vehicle fetch
+### `reminders` — unique index on `(item_id, expiry_key, expiry_date, reminder_type)`
 
-```
-POST /api/vehicles/fetch/  {"vehicle_no": "up25 ak 4922"}
-   → normalise + validate ("UP25AK4922")
-   → reject with 409 if it already exists
-   → create job (queued) → queue Celery task → 202 {job_id}
-        ↓ worker
-   mark processing → FireAPI GET → validate → normalise (rc_* → app fields)
-   → insert/update MongoDB → mark completed (or failed with an error code)
-        ↓ frontend
-   poll GET /api/jobs/{job_id}/ until completed | failed
-```
+One row per reminder **claimed for sending**. That unique index is the whole
+duplicate-prevention mechanism: the row is written before the email leaves, so a
+second sweep on the same day finds it taken and sends nothing.
 
-Refresh is the same task with a `vehicle_id`: on failure the stored document is
-left completely untouched, the job is marked `failed`, and nothing is nulled out.
-The upstream response is merged field by field, so a value that disappears
-upstream never erases the value you already have.
-
-### Reminders
-
-```
-Celery Beat 09:00 Asia/Kolkata → daily_reminder_check
-  → load settings (recipient + offsets)
-  → every vehicle with an insurance/PUC expiry date
-  → days_remaining = expiry − today   (project timezone)
-  → if days_remaining is exactly one of [7, 1, 0]
-       → claim the reminder row (unique index = no duplicates)
-       → already sent?  skip and log
-       → send via Brevo → mark sent
-```
-
-Because the match is `days_remaining == offset` and negative values are skipped,
-an already-expired document never re-sends the expiry-day email.
-
-### Authentication
-
-```
-POST /api/auth/login/ {username, password}    ← compared to APP_USERNAME/APP_PASSWORD
-  → HS256 access token  (60 min)  → HttpOnly cookie access_token
-  → HS256 refresh token (14 days) → HttpOnly cookie refresh_token
-  → csrf value embedded in the token AND set as a readable csrf_token cookie
-
-every request  → cookie (or Authorization: Bearer)
-unsafe methods → X-CSRF-Token header must match the token's csrf claim
-POST /api/auth/refresh/ → rotates both tokens
-POST /api/auth/logout/  → clears the cookies
+```json
+{
+  "item_id": "66f0…",
+  "expiry_key": "insurance",
+  "expiry_date": "2027-08-12T00:00:00Z",
+  "reminder_type": "7_days",
+  "scheduled_for": "2027-08-05T00:00:00Z",
+  "sent": true,
+  "sent_at": "…",
+  "attempts": 1,
+  "last_error": null,
+  "message_id": "<brevo id>"
+}
 ```
 
-### Endpoints at a glance
+A row with `sent: false` and `attempts > 0` is a failed delivery. It is handed
+back to the next sweep for a retry rather than being abandoned.
 
-| Method | URL | Auth |
-|---|---|---|
-| POST | `/api/auth/login/` | public |
-| POST | `/api/auth/refresh/` | refresh cookie/body |
-| POST | `/api/auth/logout/` | public |
-| GET | `/api/auth/me/` | JWT |
-| GET | `/api/vehicles/` | JWT |
-| POST | `/api/vehicles/fetch/` | JWT |
-| GET | `/api/vehicles/{id}/` | JWT |
-| POST | `/api/vehicles/{id}/refresh/` | JWT |
-| DELETE | `/api/vehicles/{id}/` | JWT |
-| GET | `/api/jobs/` | JWT |
-| GET | `/api/jobs/{job_id}/` | JWT |
-| GET | `/api/reminders/` | JWT |
-| POST | `/api/reminders/run/` | JWT |
-| GET | `/api/settings/` | JWT |
-| PUT | `/api/settings/` | JWT |
-| GET | `/api/health/` | **public** |
+### `settings`
+
+Two documents, both singletons:
+
+- `_id: "app_settings"` — `reminder_email` and `reminders`, a map of
+  `category -> [days before expiry]` with a `default` key as the fallback.
+- `_id: "sweep_state"` — `last_run_date` and `last_run_at`. This is what makes
+  the daily check run exactly once a day ([§4](#4-how-reminders-happen)).
+
+---
+
+## 4. How reminders happen
+
+This is the part that replaced Celery Beat, so it is worth reading properly.
+
+### Derived vs recorded
+
+"What is expiring" and "what is coming" are **never stored**. They are computed
+from the items and the configured offsets every time they are asked for
+(`GET /api/items/`, `GET /api/reminders/upcoming/`). Nothing can go stale and
+there is nothing to keep in sync — the schedule the UI shows is produced by the
+same function the sweep uses.
+
+Only a reminder that is actually being sent gets written down.
+
+### The sweep
+
+`reminders.services.run_sweep(today)`:
+
+1. load every item with at least one date;
+2. for each date, if `days_remaining` **exactly equals** one of the category's
+   offsets, it is due today. An already-expired date (negative days) matches
+   nothing, so a lapsed document stays visible in the app but stops emailing;
+3. claim the reminder row (unique index — see above);
+4. send it; on success mark `sent`, on failure record `last_error` and leave it
+   for the next run.
+
+It is idempotent by construction: run it five times a day and one email goes out.
+
+### What triggers it
+
+**`ReminderSweepMiddleware`** (`core/middleware.py`) — the first API request of
+each calendar day runs the sweep. Three properties make that safe to hang off a
+user's request:
+
+- the day is **claimed atomically** with a `find_one_and_update` on
+  `sweep_state`, so exactly one request per day does the work and every other
+  request costs one indexed lookup that matches nothing;
+- it runs **after the response has been built**, so nothing the user is waiting
+  for is blocked behind an email send;
+- it **cannot fail a request** — a broken sweep is logged and swallowed, because
+  a database hiccup at 9am should not turn the dashboard into a 500.
+
+Health checks, auth routes and preflights are skipped.
+
+**The honest trade-off:** email only goes out on days the app is used. If that
+is not good enough, set `CRON_TOKEN` and point any free scheduler at
+`POST /api/reminders/run/` with an `X-Cron-Token` header — Render Cron,
+cron-job.org, a GitHub Action, a `curl` in your own crontab. Both triggers are
+the same idempotent sweep, so a cron ping and a page load on the same morning
+still produce one email.
+
+```bash
+curl -X POST -H "X-Cron-Token: $CRON_TOKEN" https://your-api/api/reminders/run/
+```
+
+Set `REMINDER_SWEEP_ON_REQUEST=False` if you want the cron to be the only
+trigger.
+
+---
 
 ## 5. Local development
 
-### 1–4. Clone, virtualenv, dependencies, `.env`
-
-**Windows (PowerShell)**
-
-```powershell
-git clone <your-repo> ; cd backend
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements-dev.txt
-Copy-Item .env.example .env
+```bash
+cd backend
+python -m venv .venv && .venv/Scripts/activate   # Windows
+# python3 -m venv .venv && source .venv/bin/activate   # macOS / Linux
+pip install -r requirements.txt
+cp .env.example .env      # then fill it in
 ```
 
-**Linux / macOS**
+MongoDB, either way:
 
 ```bash
-git clone <your-repo> && cd backend
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements-dev.txt
-cp .env.example .env
+docker run -d --name expiry-mongo -p 27017:27017 -v expiry_mongo:/data/db mongo:7
 ```
 
-Then edit `.env`: set `APP_PASSWORD`, `SECRET_KEY`, `JWT_SECRET_KEY`,
-`MONGODB_URI`, `FIREAPI_API_KEY`, `BREVO_API_KEY`, `BREVO_SENDER_EMAIL`,
-`REMINDER_EMAIL`. For local work also set `DEBUG=True` and
-`AUTH_COOKIE_SECURE=False` (cookies with `Secure` are dropped over plain HTTP).
+…or point `MONGODB_URI` at a free MongoDB Atlas cluster.
 
-Generate secrets:
+Then:
 
 ```bash
-python -c "import secrets; print(secrets.token_urlsafe(50))"
-```
-
-### 5. MongoDB
-
-Use MongoDB Atlas (paste the `mongodb+srv://…` URI into `MONGODB_URI`) or run it
-locally:
-
-```bash
-docker run -d --name mongo -p 27017:27017 mongo:7
-```
-
-### 6. Redis
-
-```bash
-docker run -d --name redis -p 6379:6379 redis:7-alpine
-```
-
-On Windows without Docker, use Redis under WSL2 or Memurai.
-
-### 7. Django
-
-There are **no migrations to run** — MongoDB is the only database and the
-indexes are created automatically on startup.
-
-```bash
-python manage.py check
 python manage.py runserver 8000
 ```
 
-### 8. Celery worker
+That is the whole backend — there is no second or third process to start.
+
+Some sample data to look at, with dates positioned relative to today so the
+reminder screens have something to show:
 
 ```bash
-celery -A config worker -l info
+python manage.py seed_items
 ```
 
-On Windows the prefork pool is unsupported — use:
+`--flush` clears existing items first; `--file` points at your own JSON.
 
-```powershell
-celery -A config worker -l info --pool=solo
-```
-
-### 9. Celery Beat
-
-```bash
-celery -A config beat -l info
-```
-
-Verify everything is wired up:
-
-```bash
-curl "http://localhost:8000/api/health/?workers=1"
-```
+---
 
 ## 6. Environment variables
 
-See [`.env.example`](.env.example) for the full annotated list. The essentials:
+Every value is read from the environment; nothing sensitive is hardcoded. See
+`.env.example` for the annotated list.
 
-| Variable | Meaning |
-|---|---|
-| `SECRET_KEY`, `DEBUG`, `ALLOWED_HOSTS` | standard Django settings |
-| `APP_USERNAME`, `APP_PASSWORD` | the only login credentials; never stored in MongoDB |
-| `JWT_SECRET_KEY`, `JWT_ACCESS_TOKEN_LIFETIME_MINUTES`, `JWT_REFRESH_TOKEN_LIFETIME_DAYS` | token signing and lifetimes |
-| `AUTH_COOKIE_SECURE`, `AUTH_COOKIE_SAMESITE`, `AUTH_COOKIE_DOMAIN` | cookie storage behaviour |
-| `CSRF_PROTECTION_ENABLED`, `CSRF_HEADER_NAME` | double-submit CSRF for cookie auth |
-| `MONGODB_URI`, `MONGODB_DATABASE` | MongoDB/Atlas connection |
-| `REDIS_URL` | Celery broker + result backend + cache |
-| `FIREAPI_URL`, `FIREAPI_API_KEY`, `FIREAPI_API_KEY_HEADER`, `FIREAPI_API_KEY_PREFIX`, `FIREAPI_QUERY_PARAM`, `FIREAPI_TIMEOUT` | vehicle provider; **header name and prefix are configurable** because the provider may rename them |
-| `BREVO_API_KEY`, `BREVO_SENDER_EMAIL`, `BREVO_SENDER_NAME` | transactional email |
-| `REMINDER_EMAIL`, `REMINDER_OFFSETS_*`, `REMINDER_CHECK_HOUR/MINUTE` | reminder defaults and schedule |
-| `FRONTEND_URL`, `CORS_ALLOWED_ORIGINS` | CORS for the browser frontend |
-| `TIME_ZONE` | date maths and Beat schedule (default `Asia/Kolkata`) |
+| Group | Variables |
+| --- | --- |
+| Django | `SECRET_KEY`, `DEBUG`, `ALLOWED_HOSTS` |
+| Auth | `APP_USERNAME`, `APP_PASSWORD`, `JWT_*`, `AUTH_COOKIE_*`, `CSRF_*` |
+| MongoDB | `MONGODB_URI`, `MONGODB_DATABASE`, `MONGODB_TIMEOUT_MS` |
+| Email | `BREVO_API_KEY`, `BREVO_SENDER_EMAIL`, `BREVO_SENDER_NAME`, `REMINDER_EMAIL` |
+| Reminders | `REMINDER_OFFSETS`, `REMINDER_OFFSETS_<CATEGORY>`, `EXPIRING_SOON_DAYS`, `REMINDER_SWEEP_ON_REQUEST`, `CRON_TOKEN` |
+| CORS | `FRONTEND_URL`, `CORS_ALLOWED_ORIGINS`, `CSRF_TRUSTED_ORIGINS` |
+| Ops | `TIME_ZONE`, `LOG_LEVEL`, `THROTTLE_*`, `SECURE_SSL_REDIRECT` |
 
-If your FireAPI key travels in a plain custom header instead of `Authorization`,
-set `FIREAPI_API_KEY_HEADER=x-api-key` and leave `FIREAPI_API_KEY_PREFIX` empty.
+Leave the Brevo variables blank to run the app with in-app reminders only —
+the sweep still runs, records its attempts, and nothing else breaks.
+
+`core.logging.SensitiveDataFilter` scrubs the values named in
+`SENSITIVE_SETTING_NAMES` out of every log record as a last line of defence.
+
+---
 
 ## 7. API reference
 
 Every response uses one envelope:
 
-```json
+```jsonc
 { "success": true,  "data": { } }
-{ "success": false, "error": { "code": "VEHICLE_API_TIMEOUT", "message": "…" } }
+{ "success": false, "error": { "code": "…", "message": "…", "details": { } } }
 ```
 
-(`/api/health/` is the deliberate exception — it returns a flat object so uptime
-monitors can read it directly.)
+`/api/health/` is the only public route; everything else needs a valid JWT
+(cookie or `Authorization: Bearer`). `POST /api/reminders/run/` also accepts a
+valid `X-Cron-Token` in place of a session.
 
-Common error codes: `VALIDATION_ERROR`, `INVALID_CREDENTIALS`,
-`AUTHENTICATION_REQUIRED`, `TOKEN_EXPIRED`, `TOKEN_INVALID`, `CSRF_FAILED`,
-`INVALID_VEHICLE_NUMBER`, `VEHICLE_ALREADY_EXISTS`, `VEHICLE_NOT_FOUND`,
-`JOB_NOT_FOUND`, `VEHICLE_API_TIMEOUT`, `VEHICLE_API_UNAVAILABLE`,
-`VEHICLE_API_RATE_LIMITED`, `VEHICLE_API_INVALID_RESPONSE`,
-`VEHICLE_NOT_FOUND_UPSTREAM`, `EMAIL_SEND_FAILED`, `QUEUE_UNAVAILABLE`,
-`DATABASE_UNAVAILABLE`,
-`RATE_LIMITED`, `INTERNAL_ERROR`.
+### Auth
 
-The curl examples below use a cookie jar, exactly like the browser frontend.
+| Method | Path | Notes |
+| --- | --- | --- |
+| POST | `/api/auth/login/` | `{username, password}` → sets `access_token`, `refresh_token` (HttpOnly) and a readable `csrf_token` |
+| POST | `/api/auth/refresh/` | rotates the pair from the refresh cookie |
+| POST | `/api/auth/logout/` | clears the cookies |
+| GET | `/api/auth/me/` | the current session |
 
----
+### Items
 
-### POST `/api/auth/login/`
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET | `/api/items/categories/` | the catalogue the forms are built from |
+| GET | `/api/items/[?category=]` | every item, soonest expiry first |
+| POST | `/api/items/` | create → `201` with the stored record |
+| GET | `/api/items/{id}/` | the same shape as a list entry |
+| PUT | `/api/items/{id}/` | replaces every editable field, expiries included |
+| DELETE | `/api/items/{id}/` | also deletes the item's reminder rows |
 
-**Authentication:** public · **Throttle:** 10/min
-
-Request
-
-```json
-{ "username": "admin", "password": "change-this-password" }
-```
-
-Response `200`
+`POST` / `PUT` body:
 
 ```json
 {
-  "success": true,
-  "data": {
-    "token_type": "Bearer",
-    "expires_in": 3600,
-    "csrf_token": "…",
-    "username": "admin",
-    "access": "eyJhbGciOi…",
-    "refresh": "eyJhbGciOi…"
-  }
-}
-```
-
-Sets three cookies: `access_token` (HttpOnly), `refresh_token` (HttpOnly),
-`csrf_token` (readable). Set `AUTH_RETURN_TOKENS_IN_BODY=False` to run
-cookie-only and drop `access`/`refresh` from the body.
-
-Errors: `400 VALIDATION_ERROR`, `401 INVALID_CREDENTIALS`, `429 RATE_LIMITED`,
-`503 AUTH_NOT_CONFIGURED` (no `APP_PASSWORD` set).
-
-```bash
-curl -i -c cookies.txt -X POST http://localhost:8000/api/auth/login/ -H "Content-Type: application/json" -d '{"username":"admin","password":"change-this-password"}'
-```
-
----
-
-### POST `/api/auth/refresh/`
-
-**Authentication:** refresh cookie (or `{"refresh": "…"}` in the body)
-
-Response `200` — same shape as login; both tokens are rotated.
-Errors: `401 AUTHENTICATION_REQUIRED` (no token), `401 TOKEN_EXPIRED`, `401 TOKEN_INVALID`.
-
-```bash
-curl -b cookies.txt -c cookies.txt -X POST http://localhost:8000/api/auth/refresh/ -H "Content-Type: application/json" -d '{}'
-```
-
----
-
-### POST `/api/auth/logout/`
-
-Clears the three cookies. Always `200`.
-
-```bash
-curl -b cookies.txt -c cookies.txt -X POST http://localhost:8000/api/auth/logout/
-```
-
----
-
-### GET `/api/auth/me/`
-
-**Authentication:** JWT → `200 {"success":true,"data":{"username":"admin","authenticated":true}}`,
-otherwise `401`.
-
----
-
-### GET `/api/vehicles/`
-
-**Authentication:** JWT. Summary only — owner name, father name, chassis,
-engine and policy numbers are **not** included.
-
-```json
-{
-  "success": true,
-  "data": [
-    {
-      "id": "652f…",
-      "vehicle_no": "UP25AK4922",
-      "maker": "HONDA",
-      "model": "CB TWISTER",
-      "vehicle_category": "2W",
-      "insurance_expires_on": "2027-08-12",
-      "insurance_status": "valid",
-      "insurance_days_remaining": 346,
-      "pucc_expires_on": "2027-02-22",
-      "pucc_status": "expiring_soon",
-      "pucc_days_remaining": 175,
-      "overall_status": "expiring_soon",
-      "last_fetched_at": "2026-08-31T09:00:00Z",
-      "updated_at": "2026-08-31T09:00:00Z"
-    }
+  "category": "vehicle",
+  "name": "Honda CB Twister",
+  "identifier": "UP25AK4922",
+  "issuer": "National Insurance Company Ltd",
+  "holder": "Rohit",
+  "notes": null,
+  "expiries": [
+    { "key": "insurance", "expires_on": "2027-08-12", "reference": "2602…" },
+    { "key": "pucc", "expires_on": "2027-02-22" }
   ]
 }
 ```
 
-Statuses: `valid`, `expiring_soon` (within `EXPIRING_SOON_DAYS`, default 30),
-`expires_today`, `expired`, `unknown` (no date on record).
+The response adds a resolved `label`, `status`, `status_label` and
+`days_remaining` to every expiry, plus `overall_status` and `next_expiry` for
+the item.
 
-```bash
-curl -b cookies.txt http://localhost:8000/api/vehicles/
-```
+`expiries[].key` may be any slug — the category presets are a starting point,
+not a whitelist, so "extended cover" on a laptop needs no code change. On a
+`PUT`, `category` may be omitted and the stored one is kept.
 
----
+Notable errors: `INVALID_VEHICLE_NUMBER`, `CARD_NUMBER_REJECTED`,
+`INVALID_EXPIRY`, `UNKNOWN_CATEGORY`, `ITEM_ALREADY_EXISTS` (409, with the
+clashing `item_id` in `details`), `ITEM_NOT_FOUND`.
 
-### POST `/api/vehicles/fetch/`
+### Reminders
 
-**Authentication:** JWT · **Throttle:** 20/hour · **Asynchronous**
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET | `/api/reminders/upcoming/[?limit=]` | the derived schedule + `sweep` state |
+| GET | `/api/reminders/[?limit=&item_id=]` | what was sent or attempted |
+| POST | `/api/reminders/run/` | run the sweep now; returns the finished summary |
 
-Request
+`run/` answers synchronously with
+`{triggered_by, date, items_checked, due, sent, skipped_already_sent, failed}`.
+A signed-in caller may pass `{"for_date": "YYYY-MM-DD"}` to test the wiring
+without waiting for a real expiry; a cron caller may not.
 
-```json
-{ "vehicle_no": "up25 ak 4922" }
-```
+### Settings and health
 
-Response `202`
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET / PUT | `/api/settings/` | recipient + `reminders` (a `category -> [offsets]` map). The read-only `delivery` block reports whether email and cron are configured and when the sweep last ran — booleans and dates only, never a key. |
+| GET | `/api/health/[?sweep=1]` | public; `503` when MongoDB is unreachable |
 
-```json
-{
-  "success": true,
-  "data": {
-    "job_id": "8f14e45fceea167a5a36dedd4bea2543",
-    "vehicle_no": "UP25AK4922",
-    "status": "queued",
-    "poll_url": "/api/jobs/8f14e45fceea167a5a36dedd4bea2543/"
-  }
-}
-```
-
-Errors: `400 INVALID_VEHICLE_NUMBER`, `401`, `403 CSRF_FAILED`,
-`409 VEHICLE_ALREADY_EXISTS` (the error `details` carry `vehicle_id` and
-`refresh_url`), `429 RATE_LIMITED`, `503 QUEUE_UNAVAILABLE` (broker down).
-
-```bash
-curl -b cookies.txt -X POST http://localhost:8000/api/vehicles/fetch/ -H "Content-Type: application/json" -H "X-CSRF-Token: $CSRF" -d '{"vehicle_no":"UP25AK4922"}'
-```
+An empty offset list is a real choice ("never email me about cards") and is
+stored as such, not treated as unset.
 
 ---
-
-### GET `/api/jobs/{job_id}/`
-
-**Authentication:** JWT. Poll this until `completed` or `failed`.
-
-```json
-{ "success": true, "data": { "job_id": "abc123", "status": "processing", "vehicle_no": "UP25AK4922", "error": null } }
-{ "success": true, "data": { "job_id": "abc123", "status": "completed", "vehicle_no": "UP25AK4922", "vehicle_id": "652f…" } }
-{ "success": true, "data": { "job_id": "abc123", "status": "failed", "vehicle_no": "UP25AK4922",
-                             "error": "The vehicle information service did not respond in time.",
-                             "error_code": "VEHICLE_API_TIMEOUT" } }
-```
-
-Errors: `401`, `404 JOB_NOT_FOUND`.
-`GET /api/jobs/?limit=25` lists recent jobs.
-
-```bash
-curl -b cookies.txt http://localhost:8000/api/jobs/8f14e45fceea167a5a36dedd4bea2543/
-```
-
----
-
-### GET `/api/vehicles/{vehicle_id}/`
-
-**Authentication:** JWT. Full authorised detail.
-
-```json
-{
-  "success": true,
-  "data": {
-    "id": "652f…",
-    "vehicle_no": "UP25AK4922",
-    "registration_date": "2010-12-14",
-    "insurance": {
-      "company": "National Insurance Company Ltd",
-      "policy_no": "26020131266730212340",
-      "expires_on": "2027-08-12",
-      "status": "valid", "status_label": "Valid", "days_remaining": 346
-    },
-    "pucc": {
-      "certificate_no": "UP02500590046455",
-      "expires_on": "2027-02-22",
-      "status": "expiring_soon", "status_label": "Expiring Soon", "days_remaining": 175
-    },
-    "vehicle_category": "2W", "chassis_no": "JC47E0133748", "engine_no": "ME4JC472LA8086146",
-    "cubic_capacity": 50.0, "maker": "HONDA", "model": "CB TWISTER",
-    "owner_name": "ROHIT SRIVASTAVA", "father_name": null,
-    "fuel": "PETROL", "wheelbase": null, "seat_capacity": 2,
-    "overall_status": "expiring_soon",
-    "created_at": "…", "updated_at": "…", "last_fetched_at": "…"
-  }
-}
-```
-
-Errors: `401`, `404 VEHICLE_NOT_FOUND`.
-
----
-
-### POST `/api/vehicles/{vehicle_id}/refresh/`
-
-**Authentication:** JWT · **Throttle:** 30/hour · **Asynchronous**
-
-Body is ignored. Response `202` with `job_id`, `vehicle_id` and `poll_url`.
-The existing data stays readable throughout, and a failed refresh keeps it
-unchanged.
-
-Errors: `401`, `403 CSRF_FAILED`, `404 VEHICLE_NOT_FOUND`, `429`, `503`.
-
-```bash
-curl -b cookies.txt -X POST http://localhost:8000/api/vehicles/652f.../refresh/ -H "X-CSRF-Token: $CSRF"
-```
-
----
-
-### DELETE `/api/vehicles/{vehicle_id}/`
-
-**Authentication:** JWT. Deletes the vehicle **and** its reminder history.
-
-```json
-{ "success": true, "data": { "deleted": true, "id": "652f…" } }
-```
-
-Errors: `401`, `403 CSRF_FAILED`, `404 VEHICLE_NOT_FOUND`.
-
-```bash
-curl -b cookies.txt -X DELETE http://localhost:8000/api/vehicles/652f.../ -H "X-CSRF-Token: $CSRF"
-```
-
----
-
-### GET `/api/settings/` · PUT `/api/settings/`
-
-**Authentication:** JWT. No secrets are stored or returned here.
-
-```json
-{
-  "success": true,
-  "data": {
-    "reminder_email": "example@gmail.com",
-    "reminders": { "insurance": [7, 1, 0], "pucc": [7, 1, 0] },
-    "updated_at": "2026-08-31T09:00:00Z"
-  }
-}
-```
-
-`PUT` accepts either or both keys; offsets must be integers in `0…365`.
-Errors: `400 VALIDATION_ERROR`, `401`, `403 CSRF_FAILED`.
-
-```bash
-curl -b cookies.txt -X PUT http://localhost:8000/api/settings/ -H "Content-Type: application/json" -H "X-CSRF-Token: $CSRF" -d '{"reminder_email":"me@example.com","reminders":{"insurance":[30,7,1,0],"pucc":[7,1,0]}}'
-```
-
----
-
-### GET `/api/reminders/` · POST `/api/reminders/run/`
-
-**Authentication:** JWT. History of sent/failed reminders
-(`?limit=`, `?vehicle_id=`), and a manual trigger of the daily check
-(`202`, still idempotent).
-
----
-
-### GET `/api/health/`
-
-**Authentication:** public · no throttling.
-
-```json
-{ "status": "healthy", "database": "connected", "timestamp": "2026-08-31T09:00:00Z", "timezone": "Asia/Kolkata" }
-```
-
-`503` when MongoDB is unreachable:
-
-```json
-{ "status": "unhealthy", "database": "disconnected", "timestamp": "…", "timezone": "Asia/Kolkata" }
-```
-
-Add `?workers=1` to include broker/worker/scheduler status.
-
-```bash
-curl -i http://localhost:8000/api/health/
-```
 
 ## 8. Frontend integration (cookies + CSRF)
 
-Tokens live in **HttpOnly cookies**, so JavaScript cannot read (or leak) them.
-Two rules for the frontend:
+Tokens live in HttpOnly cookies, so JavaScript cannot read them. Because
+cookies travel automatically, unsafe requests use the classic double-submit
+defence: alongside the HttpOnly pair the backend sets a **readable**
+`csrf_token` cookie whose value must come back in the `X-CSRF-Token` header.
 
-1. Send cookies on every request — `fetch(..., { credentials: "include" })`
-   or `axios.defaults.withCredentials = true`.
-2. On unsafe methods (`POST`, `PUT`, `DELETE`), copy the readable `csrf_token`
-   cookie into the `X-CSRF-Token` header.
+Client requirements: `withCredentials: true`, echo the CSRF cookie on
+POST/PUT/PATCH/DELETE, and on a `401` call `/api/auth/refresh/` once and retry.
 
-```js
-const api = axios.create({ baseURL: import.meta.env.VITE_API_URL, withCredentials: true });
+For a cross-site deployment (frontend on Vercel, API on Render):
 
-const readCookie = (name) =>
-  document.cookie.split("; ").find((c) => c.startsWith(name + "="))?.split("=")[1];
-
-api.interceptors.request.use((config) => {
-  if (!["get", "head", "options"].includes(config.method)) {
-    config.headers["X-CSRF-Token"] = decodeURIComponent(readCookie("csrf_token") ?? "");
-  }
-  return config;
-});
-
-// On 401, call POST /api/auth/refresh/ once and retry.
+```bash
+AUTH_COOKIE_SECURE=True
+AUTH_COOKIE_SAMESITE=None
+AUTH_RETURN_TOKENS_IN_BODY=False
+CORS_ALLOWED_ORIGINS=https://your-app.vercel.app
 ```
 
-Polling after a fetch:
-
-```js
-const { data } = await api.post("/api/vehicles/fetch/", { vehicle_no });
-let job;
-do {
-  await new Promise((r) => setTimeout(r, 2000));
-  job = (await api.get(`/api/jobs/${data.data.job_id}/`)).data.data;
-} while (job.status === "queued" || job.status === "processing");
-```
-
-Cross-site deployment (frontend and API on different domains) needs
-`AUTH_COOKIE_SAMESITE=None`, `AUTH_COOKIE_SECURE=True` (so HTTPS on both sides)
-and the frontend origin listed in `CORS_ALLOWED_ORIGINS`.
+---
 
 ## 9. Tests
 
-FireAPI and Brevo are always mocked; MongoDB runs in-memory through `mongomock`.
-No test makes a real network call.
-
 ```bash
-pip install -r requirements-dev.txt
-pytest                      # 119 tests
-pytest tests/test_reminders.py -v
+pip install pytest pytest-django mongomock
+pytest
 ```
 
-Covered: valid/invalid login, protected endpoints with and without a JWT, CSRF
-enforcement, token refresh/rotation, vehicle number normalisation and
-validation, duplicate vehicles, FireAPI success/timeout/connection
-error/429/404/invalid-JSON/malformed payload, job creation and every status
-transition, successful refresh, failed refresh preserving old data, refresh never
-nulling values, 7-day/1-day/expiry-day reminders, no duplicate emails, expired
-documents not re-sending, retry after a failed send, Brevo payload/subject
-construction, settings validation, list vs detail data exposure, and health in
-both the healthy and unhealthy state.
+163 tests, no network and no real database — `mongomock` backs the whole suite
+via `core.mongo.set_override_db`, and `pytest_bootstrap.py` sets the environment
+before Django settings load.
+
+What is actually asserted, beyond the CRUD happy paths:
+
+- **`tests/test_core.py`** — a full card number is *rejected* rather than
+  truncated, and the rejection does not echo the number back.
+- **`tests/test_items.py`** — nothing is written when a card number is refused;
+  duplicate detection is category-scoped and separator-insensitive; a past date
+  is accepted and reads as expired.
+- **`tests/test_reminders.py`** — reminders fire on exactly the offset days and
+  nothing between them; expired dates never re-email; running the sweep twice
+  sends one email; a failed send is retried on the next run; one failure does
+  not stop the others; a cron caller cannot backdate the sweep.
+- **`tests/test_sweep_middleware.py`** — the scheduler replacement: it fires
+  once per day off a real request, a sweep that raises does not fail the
+  response it is riding on, and health and auth routes do not trigger it.
+
+---
 
 ## 10. Docker
 
-One image, three roles selected by the container command.
-
-```bash
-docker build -t vehicle-reminder-backend .
-
-docker run --rm -p 8000:8000 --env-file .env vehicle-reminder-backend web
-docker run --rm            --env-file .env vehicle-reminder-backend worker
-docker run --rm            --env-file .env vehicle-reminder-backend beat
-```
-
-Full local stack (MongoDB + Redis + all three processes):
-
 ```bash
 docker compose up --build
 ```
 
-The image runs as a non-root user and has a `HEALTHCHECK` hitting `/api/health/`.
+Two services: MongoDB and the web app. That is all there is to run.
 
-## 11. Deploying to Render
+---
 
-MongoDB comes from **MongoDB Atlas** (Render has no managed MongoDB). Add
-`0.0.0.0/0` — or Render's static outbound IPs — to the Atlas network access list.
+## 11. Deploying
 
-**Recommended: three services from one repository, plus one Key Value (Redis) instance.**
+`render.yaml` is a working blueprint: one web service, plus an optional daily
+cron job that hits `/api/reminders/run/` with `X-Cron-Token`. Drop the cron
+service if you are content for email to depend on the app being opened.
 
-1. **Environment group** — create `vehicle-reminder-shared` in the dashboard and
-   add every variable from `.env.example` (`MONGODB_URI`, `APP_USERNAME`,
-   `APP_PASSWORD`, `JWT_SECRET_KEY`, `SECRET_KEY`, `FIREAPI_*`, `BREVO_*`,
-   `REMINDER_EMAIL`, `TIME_ZONE`, `CORS_ALLOWED_ORIGINS`, …). Attach it to all
-   three services so they never drift apart.
-2. **Key Value instance** — `vehicle-reminder-redis`; copy its internal
-   connection string into `REDIS_URL` in the group.
-3. **Web service** — Docker runtime, command `./entrypoint.sh web`,
-   health check path `/api/health/`.
-4. **Background worker** — Docker runtime, command `./entrypoint.sh worker`.
-5. **Background worker** — Docker runtime, command `./entrypoint.sh beat`.
+MongoDB comes from Atlas — set `MONGODB_URI`. `railway.json` deploys the same
+image on Railway.
 
-`render.yaml` in this repository declares exactly that; push it and use
-*New → Blueprint*. Then set:
+Checklist for any host:
 
-```
-DEBUG=False
-ALLOWED_HOSTS=your-api.onrender.com        # RENDER_EXTERNAL_HOSTNAME is added automatically
-CORS_ALLOWED_ORIGINS=https://your-frontend.onrender.com
-FRONTEND_URL=https://your-frontend.onrender.com
-AUTH_COOKIE_SECURE=True
-AUTH_COOKIE_SAMESITE=None                  # only if frontend and API are on different domains
-```
-
-Render sets `PORT`; `entrypoint.sh` already binds to it. Do **not** enable
-`SECURE_SSL_REDIRECT` (Render terminates TLS in front of the app).
-
-Free-tier note: free web services sleep, and Celery Beat must stay awake to send
-reminders — run the worker and beat on a paid instance type, or keep them on the
-smallest paid plan while the web service stays free.
-
-## 12. Deploying to Railway
-
-Railway can run all three processes from the same repository as separate
-services, and it does offer managed Redis. MongoDB Atlas is still recommended.
-
-1. **New Project → Deploy from GitHub repo** (root = `backend/`). Railway
-   detects the `Dockerfile`; `railway.json` sets the start command and health
-   check for the web service.
-2. **Add → Database → Redis.** Reference it from every service as
-   `REDIS_URL=${{Redis.REDIS_URL}}`.
-3. **Add two more services from the same repo** and override their start
-   commands in *Settings → Deploy → Custom Start Command*:
-   * worker → `./entrypoint.sh worker`
-   * beat → `./entrypoint.sh beat`
-4. **Shared variables** — define the secrets once at project level
-   (*Variables → Shared Variables*) and reference them in each service, e.g.
-   `MONGODB_URI=${{shared.MONGODB_URI}}`.
-5. Generate a public domain for the web service only, then set
-   `ALLOWED_HOSTS` (or rely on `RAILWAY_PUBLIC_DOMAIN`, which is picked up
-   automatically), `CORS_ALLOWED_ORIGINS` and `FRONTEND_URL`.
-
-The worker and beat services need no public domain and no health check —
-disable it for them.
-
-## 13. Security notes
-
-* **Secrets** — everything sensitive comes from the environment. `.env` is
-  git-ignored; only `.env.example` is committed. Nothing is hardcoded.
-* **Never exposed to the frontend** — the FireAPI key, the Brevo key, the JWT
-  secret, the app password and the MongoDB URI are never present in any API
-  response. FireAPI is called from Django/Celery only.
-* **Logging** — job/reminder lifecycle, FireAPI status codes and reminder
-  outcomes are logged; API keys, tokens, passwords and `Authorization` headers
-  are not. `core/logging.SensitiveDataFilter` scrubs any configured secret value
-  that would otherwise reach a log line, and vehicle numbers are masked in
-  FireAPI log messages.
-* **JWT** — HS256, short-lived access token, rotating refresh token, issuer
-  checked, and tokens are invalidated automatically when `APP_USERNAME` changes.
-* **Cookies** — `HttpOnly` + `Secure` + `SameSite`, with double-submit CSRF on
-  unsafe methods.
-* **Transport/headers** — HSTS (when `DEBUG=False`), `nosniff`, `DENY` framing,
-  `same-origin` referrer, restrictive CSP and `Cache-Control: no-store` on API
-  responses.
-* **Input** — DRF serializer validation, vehicle number normalisation and a
-  format check that accepts standard, BH-series and older plate formats.
-* **Rate limiting** — login 10/min, fetch 20/hour, refresh 30/hour, reads
-  240/min (all configurable).
-* **Data minimisation** — the list endpoint omits owner name, father name,
-  chassis number, engine number and policy/certificate numbers; they appear only
-  in the authenticated detail endpoint.
-* **Timeouts** — connect/read timeouts on every outbound HTTP call, plus a
-  MongoDB server-selection timeout.
-* **Production** — `DEBUG=False`, explicit `ALLOWED_HOSTS`, explicit
-  `CORS_ALLOWED_ORIGINS` (no wildcards with credentials).
-
-## 14. Command cheat sheet
-
-```bash
-# install
-python -m venv .venv && source .venv/bin/activate      # Windows: .\.venv\Scripts\Activate.ps1
-pip install -r requirements-dev.txt                    # production: requirements.txt
-
-# configure
-cp .env.example .env                                   # Windows: Copy-Item .env.example .env
-python -c "import secrets; print(secrets.token_urlsafe(50))"
-
-# migrations: none — MongoDB only. Indexes are created on startup:
-python manage.py check
-
-# infrastructure
-docker run -d --name mongo -p 27017:27017 mongo:7
-docker run -d --name redis -p 6379:6379 redis:7-alpine
-
-# run (three terminals)
-python manage.py runserver 8000
-celery -A config worker -l info                        # Windows: add --pool=solo
-celery -A config beat -l info
-
-# production web process
-gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 3 --timeout 60
-
-# tests
-pytest
-pytest -v tests/test_reminders.py
-
-# docker
-docker build -t vehicle-reminder-backend .
-docker run --rm -p 8000:8000 --env-file .env vehicle-reminder-backend web
-docker run --rm --env-file .env vehicle-reminder-backend worker
-docker run --rm --env-file .env vehicle-reminder-backend beat
-docker compose up --build
-
-# smoke test
-curl -i http://localhost:8000/api/health/
-curl -i -c cookies.txt -X POST http://localhost:8000/api/auth/login/ \
-  -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"change-this-password"}'
-```
+- [ ] `DEBUG=False`, a real `SECRET_KEY` and `JWT_SECRET_KEY`
+- [ ] `ALLOWED_HOSTS` and `CORS_ALLOWED_ORIGINS` set to the real domains
+- [ ] `AUTH_COOKIE_SECURE=True` (and `SAMESITE=None` if cross-site)
+- [ ] `MONGODB_URI` pointing at Atlas, with the host's egress IPs allowed
+- [ ] `TIME_ZONE` set to yours, or reminders land on the wrong day
+- [ ] `CRON_TOKEN` set if reminders must arrive on days you do not open the app

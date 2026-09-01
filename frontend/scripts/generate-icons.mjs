@@ -9,10 +9,12 @@
  *   public/icons/maskable-512.png      (maskable: full bleed, art in the safe zone)
  *   public/icons/apple-touch-icon.png  (180x180, opaque, no transparency)
  *
- * The artwork is the app mark: a white car on the brand blue, with a green
- * check badge at the top right (documents in good standing). Edit BRAND or the
- * geometry constants and re-run to change it. `public/favicon.svg` is the same
- * mark by hand and should be kept in step.
+ * The artwork is the app mark: a white calendar page on the brand blue, with a
+ * green check badge at the top right (nothing overdue). A calendar rather than
+ * any one kind of item, because the app tracks documents, cards, policies and
+ * vehicle papers alike. Edit BRAND or the geometry constants and re-run to
+ * change it. `public/favicon.svg` is the same mark by hand and should be kept
+ * in step.
  */
 import { deflateSync } from 'node:zlib';
 import { writeFileSync, mkdirSync } from 'node:fs';
@@ -24,7 +26,7 @@ const OUT_DIR = resolve(HERE, '..', 'public', 'icons');
 
 const BRAND = {
   background: [59, 46, 212], // #3b2ed4 - brand blue, matches primary-600
-  glyph: [255, 255, 255], // the car
+  glyph: [255, 255, 255], // the calendar
   badge: [34, 197, 94], // #22c55e - the green check circle
 };
 
@@ -129,23 +131,22 @@ function nearPolyline(x, y, points, thickness) {
   return false;
 }
 
-// --- the car ---------------------------------------------------------------
-const CAR_CENTRE = [0, 0.1]; // nudged down; the badge occupies the top right
-const BODY = { left: -0.62, top: -0.02, right: 0.62, bottom: 0.24, radius: 0.1 };
-// Roof drawn as a thick outline, so the window is the background showing through.
-const CABIN = [
-  [-0.42, 0.0],
-  [-0.2, -0.28],
-  [0.2, -0.28],
-  [0.42, 0.0],
-];
-const CABIN_THICKNESS = 0.078;
-const WHEELS = [
-  [-0.34, 0.33],
-  [0.32, 0.33],
-];
-const WHEEL_OUTER = 0.16;
-const WHEEL_HUB = 0.072;
+// --- the calendar ----------------------------------------------------------
+const CAL_CENTRE = [0, 0.08]; // nudged down; the badge occupies the top right
+// The page, drawn as a thick rounded outline so the middle shows the field.
+const PAGE = { left: -0.6, top: -0.38, right: 0.6, bottom: 0.56, radius: 0.14 };
+const PAGE_STROKE = 0.1;
+// The solid header band across the top of the page.
+const HEADER_BOTTOM = -0.12;
+// Two binding rings standing above the header.
+const RINGS = [-0.3, 0.3];
+const RING_TOP = -0.58;
+const RING_WIDTH = 0.055;
+// Date marks on the page body: two rows of short dashes.
+const MARK_ROWS = [0.12, 0.34];
+const MARK_COLUMNS = [-0.28, 0, 0.28];
+const MARK_WIDTH = 0.11;
+const MARK_HEIGHT = 0.045;
 
 // --- the check badge -------------------------------------------------------
 // On the rounded square the badge hugs the top-right corner, as in the source
@@ -164,16 +165,16 @@ const CHECK_THICKNESS = 0.045;
 
 /** Centre of the artwork's bounding box, used to re-centre the group. */
 function artBoundsCentre(badgeCentre) {
-  const left = CAR_CENTRE[0] + BODY.left;
+  const left = CAL_CENTRE[0] + PAGE.left;
   const right = badgeCentre[0] + BADGE_RADIUS + BADGE_RING;
-  const top = badgeCentre[1] - BADGE_RADIUS - BADGE_RING;
-  const bottom = CAR_CENTRE[1] + WHEELS[0][1] + WHEEL_OUTER;
+  const top = Math.min(badgeCentre[1] - BADGE_RADIUS - BADGE_RING, CAL_CENTRE[1] + RING_TOP);
+  const bottom = CAL_CENTRE[1] + PAGE.bottom;
   return [(left + right) / 2, (top + bottom) / 2];
 }
 
 /**
  * Classifies one sample point of the artwork.
- * Returns 'car' | 'badge' | 'badge-ring' | 'check' | null.
+ * Returns 'glyph' | 'badge' | 'badge-ring' | 'check' | null.
  */
 function sampleArt(gx, gy, badgeCentre) {
   // Badge first: it sits on top of everything.
@@ -185,30 +186,60 @@ function sampleArt(gx, gy, badgeCentre) {
   }
   if (badgeDistance <= BADGE_RADIUS + BADGE_RING) return 'badge-ring';
 
-  // Car, in its own centred space.
-  const cx = gx - CAR_CENTRE[0];
-  const cy = gy - CAR_CENTRE[1];
+  // Calendar, in its own centred space.
+  const cx = gx - CAL_CENTRE[0];
+  const cy = gy - CAL_CENTRE[1];
 
-  // Hubs punch through the body and the tyres.
-  for (const [wx, wy] of WHEELS) {
-    const dx = cx - wx;
-    const dy = cy - wy;
-    if (Math.sqrt(dx * dx + dy * dy) <= WHEEL_HUB) return null;
+  // Binding rings, above the page.
+  for (const rx of RINGS) {
+    if (
+      insideRoundedRect(
+        cx, cy,
+        rx - RING_WIDTH, RING_TOP,
+        rx + RING_WIDTH, PAGE.top + PAGE_STROKE,
+        RING_WIDTH,
+      )
+    ) {
+      return 'glyph';
+    }
   }
 
-  if (insideRoundedRect(cx, cy, BODY.left, BODY.top, BODY.right, BODY.bottom, BODY.radius)) {
-    return 'car';
-  }
-  if (nearPolyline(cx, cy, CABIN, CABIN_THICKNESS)) return 'car';
+  const inPage = insideRoundedRect(
+    cx, cy, PAGE.left, PAGE.top, PAGE.right, PAGE.bottom, PAGE.radius,
+  );
+  if (!inPage) return null;
 
-  for (const [wx, wy] of WHEELS) {
-    const dx = cx - wx;
-    const dy = cy - wy;
-    if (Math.sqrt(dx * dx + dy * dy) <= WHEEL_OUTER) return 'car';
+  // The solid header band.
+  if (cy <= HEADER_BOTTOM) return 'glyph';
+
+  // The page outline: inside the page but outside its inset.
+  const inInterior = insideRoundedRect(
+    cx, cy,
+    PAGE.left + PAGE_STROKE, PAGE.top + PAGE_STROKE,
+    PAGE.right - PAGE_STROKE, PAGE.bottom - PAGE_STROKE,
+    Math.max(0.01, PAGE.radius - PAGE_STROKE),
+  );
+  if (!inInterior) return 'glyph';
+
+  // Date marks on the page body.
+  for (const my of MARK_ROWS) {
+    for (const mx of MARK_COLUMNS) {
+      if (
+        insideRoundedRect(
+          cx, cy,
+          mx - MARK_WIDTH / 2, my - MARK_HEIGHT / 2,
+          mx + MARK_WIDTH / 2, my + MARK_HEIGHT / 2,
+          MARK_HEIGHT / 2,
+        )
+      ) {
+        return 'glyph';
+      }
+    }
   }
 
   return null;
 }
+
 
 /**
  * Renders one icon.
@@ -232,7 +263,7 @@ function render(size, { maskable = false, opaque = false } = {}) {
   for (let py = 0; py < size; py += 1) {
     for (let px = 0; px < size; px += 1) {
       let bgHits = 0;
-      const paint = { car: 0, badge: 0, 'badge-ring': 0, check: 0 };
+      const paint = { glyph: 0, badge: 0, 'badge-ring': 0, check: 0 };
 
       for (let sy = 0; sy < samples; sy += 1) {
         for (let sx = 0; sx < samples; sx += 1) {
@@ -264,7 +295,7 @@ function render(size, { maskable = false, opaque = false } = {}) {
 
       // Painted in back-to-front order.
       const layers = [
-        [paint.car / total, BRAND.glyph],
+        [paint.glyph / total, BRAND.glyph],
         [paint['badge-ring'] / total, BRAND.glyph],
         [paint.badge / total, BRAND.badge],
         [paint.check / total, BRAND.glyph],

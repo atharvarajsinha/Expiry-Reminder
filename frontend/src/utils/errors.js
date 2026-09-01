@@ -27,20 +27,13 @@ export const ERROR_CODE = {
   CSRF_FAILED: 'CSRF_FAILED',
   AUTH_NOT_CONFIGURED: 'AUTH_NOT_CONFIGURED',
 
+  ITEM_NOT_FOUND: 'ITEM_NOT_FOUND',
+  ITEM_ALREADY_EXISTS: 'ITEM_ALREADY_EXISTS',
+  UNKNOWN_CATEGORY: 'UNKNOWN_CATEGORY',
+  INVALID_EXPIRY: 'INVALID_EXPIRY',
   INVALID_VEHICLE_NUMBER: 'INVALID_VEHICLE_NUMBER',
-  VEHICLE_ALREADY_EXISTS: 'VEHICLE_ALREADY_EXISTS',
-  VEHICLE_NOT_FOUND: 'VEHICLE_NOT_FOUND',
-  JOB_NOT_FOUND: 'JOB_NOT_FOUND',
+  CARD_NUMBER_REJECTED: 'CARD_NUMBER_REJECTED',
 
-  VEHICLE_API_TIMEOUT: 'VEHICLE_API_TIMEOUT',
-  VEHICLE_API_UNAVAILABLE: 'VEHICLE_API_UNAVAILABLE',
-  VEHICLE_API_ERROR: 'VEHICLE_API_ERROR',
-  VEHICLE_API_RATE_LIMITED: 'VEHICLE_API_RATE_LIMITED',
-  VEHICLE_API_INVALID_RESPONSE: 'VEHICLE_API_INVALID_RESPONSE',
-  VEHICLE_API_NOT_CONFIGURED: 'VEHICLE_API_NOT_CONFIGURED',
-  VEHICLE_NOT_FOUND_UPSTREAM: 'VEHICLE_NOT_FOUND_UPSTREAM',
-
-  QUEUE_UNAVAILABLE: 'QUEUE_UNAVAILABLE',
   EMAIL_NOT_CONFIGURED: 'EMAIL_NOT_CONFIGURED',
   EMAIL_SEND_FAILED: 'EMAIL_SEND_FAILED',
   DATABASE_UNAVAILABLE: 'DATABASE_UNAVAILABLE',
@@ -70,27 +63,12 @@ const CODE_MESSAGES = {
   [ERROR_CODE.RATE_LIMITED]: 'Too many requests. Please try again shortly.',
   [ERROR_CODE.INTERNAL_ERROR]: 'Something went wrong on the server.',
 
-  [ERROR_CODE.VEHICLE_NOT_FOUND]: 'This vehicle is no longer available.',
-  [ERROR_CODE.JOB_NOT_FOUND]:
-    'We lost track of that background job. Please try again.',
+  [ERROR_CODE.ITEM_NOT_FOUND]: 'This item is no longer available.',
+  [ERROR_CODE.UNKNOWN_CATEGORY]:
+    'That category is not one this app knows about.',
+  [ERROR_CODE.INVALID_EXPIRY]:
+    'Check the expiry dates: each one needs a valid date and its own name.',
 
-  [ERROR_CODE.VEHICLE_API_TIMEOUT]:
-    'The vehicle information service took too long to respond. Please try again.',
-  [ERROR_CODE.VEHICLE_API_UNAVAILABLE]:
-    'The vehicle information service is unavailable right now. Please try again later.',
-  [ERROR_CODE.VEHICLE_API_ERROR]:
-    'The vehicle information service could not complete the request.',
-  [ERROR_CODE.VEHICLE_API_RATE_LIMITED]:
-    'The vehicle information service is rate limiting requests. Please try again in a few minutes.',
-  [ERROR_CODE.VEHICLE_API_INVALID_RESPONSE]:
-    'The vehicle information service returned data we could not read.',
-  [ERROR_CODE.VEHICLE_API_NOT_CONFIGURED]:
-    'The vehicle information service is not configured on the server.',
-  [ERROR_CODE.VEHICLE_NOT_FOUND_UPSTREAM]:
-    'No records were found for this registration number. Please check it and try again.',
-
-  [ERROR_CODE.QUEUE_UNAVAILABLE]:
-    'The background worker is unavailable, so this could not be queued. Please try again shortly.',
   [ERROR_CODE.EMAIL_NOT_CONFIGURED]:
     'Email reminders are not configured on the server yet.',
   [ERROR_CODE.EMAIL_SEND_FAILED]: 'The reminder email could not be sent.',
@@ -118,11 +96,17 @@ const STATUS_MESSAGES = {
 
 /**
  * Codes whose server message is more specific than anything we could write
- * here (it names the vehicle or the offending value) and is safe to display.
+ * here (it names the item or the offending value) and is safe to display.
+ *
+ * CARD_NUMBER_REJECTED is on the list on purpose: the server's wording tells
+ * the user *why* only four digits are accepted, which is the whole point of
+ * refusing the input instead of trimming it.
  */
 const PREFER_SERVER_MESSAGE = new Set([
   ERROR_CODE.INVALID_VEHICLE_NUMBER,
-  ERROR_CODE.VEHICLE_ALREADY_EXISTS,
+  ERROR_CODE.ITEM_ALREADY_EXISTS,
+  ERROR_CODE.CARD_NUMBER_REJECTED,
+  ERROR_CODE.INVALID_EXPIRY,
 ]);
 
 function isPlainMessage(value) {
@@ -187,6 +171,7 @@ const STATUS_TO_CODE = {
   401: ERROR_CODE.AUTHENTICATION_REQUIRED,
   403: ERROR_CODE.AUTHENTICATION_REQUIRED,
   404: ERROR_CODE.NOT_FOUND,
+  409: ERROR_CODE.ITEM_ALREADY_EXISTS,
   429: ERROR_CODE.RATE_LIMITED,
   500: ERROR_CODE.INTERNAL_ERROR,
 };
@@ -214,15 +199,4 @@ export function getFieldErrors(error) {
     }
   }
   return result;
-}
-
-/**
- * A friendly sentence for a background job that ended in `failed`.
- * Job records carry `error_code` plus a safe `error` message.
- */
-export function getJobErrorMessage(job) {
-  if (!job) return CODE_MESSAGES[ERROR_CODE.VEHICLE_API_ERROR];
-  if (job.errorCode && CODE_MESSAGES[job.errorCode]) return CODE_MESSAGES[job.errorCode];
-  if (isPlainMessage(job.error)) return job.error;
-  return CODE_MESSAGES[ERROR_CODE.VEHICLE_API_ERROR];
 }

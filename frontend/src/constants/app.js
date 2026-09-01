@@ -11,10 +11,10 @@
  * Those are read at build time by the browser and the install prompt, so they
  * cannot import from here.
  */
-export const APP_NAME = 'Remind Vahan';
+export const APP_NAME = 'Expiry Reminders';
 
 /** One line describing what the app does; used under the wordmark and in meta. */
-export const APP_TAGLINE = 'Vehicle document reminders';
+export const APP_TAGLINE = 'Never miss a renewal';
 
 export const APP_DESCRIPTION =
-  'Track vehicle insurance and PUC expiry dates with simple email reminders.';
+  'Track when your documents, cards, vehicle papers and policies expire, and get reminded before they do.';

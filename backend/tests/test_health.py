@@ -29,25 +29,33 @@ class TestHealth:
         # No Authorization header, no cookies -- still reachable.
         assert api_client.get("/api/health/").status_code == 200
 
-    def test_worker_status_is_optional(self, api_client, monkeypatch):
-        monkeypatch.setattr(
-            "health.views._worker_status",
-            lambda timeout=1.0: {
-                "broker": "connected",
-                "workers_online": 1,
-                "workers": ["celery@test"],
-                "scheduled_tasks": ["daily-reminder-check"],
-            },
-        )
+    def test_sweep_status_is_optional(self, api_client):
+        # Off by default -- an uptime monitor should not pay for the extra read.
+        assert "sweep" not in api_client.get("/api/health/").json()
 
-        response = api_client.get("/api/health/?workers=1")
+        response = api_client.get("/api/health/?sweep=1")
 
         assert response.status_code == 200
-        assert response.json()["celery"]["workers_online"] == 1
+        # Nothing has swept yet, which is a reportable state, not an error.
+        assert response.json()["sweep"] == {
+            "last_run_date": None,
+            "last_run_at": None,
+        }
+
+    def test_sweep_status_survives_a_broken_database(self, api_client, monkeypatch):
+        monkeypatch.setattr(
+            "reminders.services.sweep_state",
+            lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+
+        response = api_client.get("/api/health/?sweep=1")
+
+        assert response.status_code == 200
+        assert response.json()["sweep"]["last_run_date"] is None
 
     def test_health_response_contains_no_secrets(self, api_client):
         from django.conf import settings
 
         content = api_client.get("/api/health/").content.decode()
-        for secret in (settings.FIREAPI_API_KEY, settings.BREVO_API_KEY, settings.JWT_SECRET_KEY):
+        for secret in (settings.BREVO_API_KEY, settings.JWT_SECRET_KEY, settings.CRON_TOKEN):
             assert secret not in content

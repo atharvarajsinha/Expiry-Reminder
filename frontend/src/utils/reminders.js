@@ -1,26 +1,13 @@
 /**
- * Reminder labelling, and the upcoming-schedule calculation.
+ * Reminder wording.
  *
- * The backend stores a reminder record only when the daily sweep claims one,
- * so "what is coming" cannot be read from the API. It is derived here from the
- * same two inputs the sweep uses - each vehicle's expiry dates and the
- * configured day offsets - using the identical rule:
- *
- *     send date = expiry date - offset days,  and only while expiry >= today
- *
- * (`reminders/services.py: due_reminders` skips documents that have already
- * expired, so this does too.)
+ * The *schedule* used to be computed here, because the backend only wrote a
+ * reminder record once its daily sweep claimed one and there was nothing to
+ * read beforehand. It now derives the upcoming list on request
+ * (`GET /api/reminders/upcoming/`), so this file is only about turning stored
+ * values into words - and the client can no longer drift from what the sweep
+ * will actually do.
  */
-import { addDays, daysUntil, parseApiDate, toIsoDate, todayLocal } from './date.js';
-
-export const DOCUMENT_LABELS = {
-  insurance: 'Insurance',
-  pucc: 'PUC',
-};
-
-export function documentLabel(documentType) {
-  return DOCUMENT_LABELS[documentType] || documentType || 'Document';
-}
 
 /** `7` -> `7 days before`, `1` -> `1 day before`, `0` -> `On expiry day`. */
 export function offsetLabel(days) {
@@ -41,46 +28,29 @@ export function reminderTypeLabel(reminderType) {
   return reminderType;
 }
 
+/** `Today` / `Tomorrow` / `In 5 days`, for a send date. */
+export function sendDistanceLabel(daysUntilSend) {
+  if (daysUntilSend === null || daysUntilSend === undefined) return null;
+  if (daysUntilSend <= 0) return 'Today';
+  if (daysUntilSend === 1) return 'Tomorrow';
+  return `In ${daysUntilSend} days`;
+}
+
 /**
- * Every reminder still to come, soonest first.
+ * A one-line summary of a finished sweep, for the toast after "Send due now".
  *
- * @param vehicles  mapped vehicle summaries (need `insurance`/`pucc` expiry)
- * @param reminders configured offsets, `{ insurance: [7,1,0], pucc: [...] }`
+ * The sweep is idempotent, so "0 sent, 2 already sent" is a success worth
+ * wording clearly rather than an ambiguous "done".
  */
-export function upcomingReminders(vehicles, reminders) {
-  if (!vehicles?.length || !reminders) return [];
+export function sweepSummaryMessage(summary) {
+  if (!summary) return 'Reminder check finished.';
+  if (summary.error) return summary.error;
 
-  const today = todayLocal();
-  const upcoming = [];
+  const parts = [];
+  if (summary.sent) parts.push(`${summary.sent} sent`);
+  if (summary.skipped) parts.push(`${summary.skipped} already sent today`);
+  if (summary.failed) parts.push(`${summary.failed} failed`);
 
-  for (const vehicle of vehicles) {
-    for (const documentType of ['insurance', 'pucc']) {
-      const expiresOn = vehicle[documentType]?.expiresOn;
-      const expiryDate = parseApiDate(expiresOn);
-      if (!expiryDate) continue;
-
-      // An expired document never triggers another email.
-      const remaining = daysUntil(expiresOn, today);
-      if (remaining === null || remaining < 0) continue;
-
-      for (const offset of reminders[documentType] || []) {
-        if (offset > remaining) continue; // that send date has already passed
-        const sendOn = addDays(expiryDate, -offset);
-        upcoming.push({
-          key: `${vehicle.id}-${documentType}-${offset}`,
-          vehicleId: vehicle.id,
-          vehicleNo: vehicle.vehicleNo,
-          maker: vehicle.maker,
-          model: vehicle.model,
-          documentType,
-          offset,
-          expiresOn,
-          sendOn: toIsoDate(sendOn),
-          daysUntilSend: remaining - offset,
-        });
-      }
-    }
-  }
-
-  return upcoming.sort((a, b) => a.sendOn.localeCompare(b.sendOn));
+  if (!parts.length) return 'Nothing was due today.';
+  return `Reminder check finished: ${parts.join(', ')}.`;
 }

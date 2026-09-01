@@ -163,7 +163,7 @@ export default function Login() {
           ) : null}
 
           <p className="mt-6 text-center text-xs text-slate-400 dark:text-slate-500">
-            {APP_TAGLINE} &middot; insurance and PUC expiry by email.
+            {APP_TAGLINE} &middot; documents, cards and papers, tracked in one place.
           </p>
         </div>
       </main>

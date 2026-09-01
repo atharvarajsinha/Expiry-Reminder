@@ -26,10 +26,6 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 
-# Celery
-celerybeat-schedule*
-celerybeat.pid
-
 # Django
 staticfiles/
 *.log

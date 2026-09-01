@@ -1,7 +1,11 @@
-# Remind Vahan — Frontend
+# Expiry Reminders — Frontend
 
-An installable PWA for tracking vehicle insurance and PUC expiry, built against the
-Django REST + MongoDB + Celery backend in `../backend`.
+An installable PWA for tracking anything with an expiry date — vehicle papers,
+passports, debit and credit cards, insurance policies, subscriptions, warranties —
+built against the Django REST + MongoDB backend in `../backend`.
+
+Everything is entered by hand: there is no external lookup, and no background job
+to wait on anywhere in this app.
 
 The product name lives in one place — `APP_NAME` in
 [`src/constants/app.js`](src/constants/app.js). Change it there and the wordmark,
@@ -54,7 +58,7 @@ npm run build && npm run preview
 
 Every `VITE_*` value is inlined into the JavaScript bundle at build time and is
 therefore **public**. Only non-secret configuration belongs here — never
-`FIREAPI_API_KEY`, `BREVO_API_KEY`, `JWT_SECRET`, `APP_PASSWORD` or `MONGODB_URI`.
+`BREVO_API_KEY`, `JWT_SECRET_KEY`, `APP_PASSWORD`, `CRON_TOKEN` or `MONGODB_URI`.
 Those stay in the backend environment.
 
 | Variable                    | Default                     | Purpose                                            |
@@ -63,9 +67,7 @@ Those stay in the backend environment.
 | `VITE_CSRF_HEADER_NAME`     | `X-CSRF-Token`              | Must match the backend's `CSRF_HEADER_NAME`.        |
 | `VITE_CSRF_COOKIE_NAME`     | `csrf_token`                | Must match the backend's `AUTH_COOKIE_CSRF_NAME`.   |
 | `VITE_AUTH_ME_PATH`         | `/auth/me/`                 | Startup authentication check endpoint.              |
-| `VITE_EXPIRING_SOON_DAYS`   | `30`                        | Should match the backend's `EXPIRING_SOON_DAYS`.    |
-| `VITE_JOB_POLL_INTERVAL_MS` | `2500`                      | Job polling interval.                               |
-| `VITE_JOB_POLL_TIMEOUT_MS`  | `300000`                    | Give up following a job after this long.            |
+| `VITE_EXPIRING_SOON_DAYS`   | `30`                        | Fallback only; should match the backend's `EXPIRING_SOON_DAYS`. |
 
 ---
 
@@ -123,113 +125,113 @@ Mapping between snake_case payloads and the shapes components use lives entirely
 `src/api/`, so a field rename touches one file.
 
 ```text
-POST   /api/auth/login/            POST   /api/vehicles/fetch/       → 202 + job_id
-POST   /api/auth/refresh/          POST   /api/vehicles/{id}/refresh/ → 202 + job_id
-POST   /api/auth/logout/           DELETE /api/vehicles/{id}/
-GET    /api/auth/me/               GET    /api/jobs/{job_id}/
-GET    /api/vehicles/              GET    /api/jobs/?limit=n
-GET    /api/vehicles/{id}/         GET    /api/settings/  ·  PUT /api/settings/
-GET    /api/reminders/?limit=n     POST   /api/reminders/run/
+POST   /api/auth/login/          GET    /api/items/categories/
+POST   /api/auth/refresh/        GET    /api/items/            POST   /api/items/
+POST   /api/auth/logout/         GET    /api/items/{id}/       PUT    /api/items/{id}/
+GET    /api/auth/me/             DELETE /api/items/{id}/
+GET    /api/settings/            GET    /api/reminders/upcoming/
+PUT    /api/settings/            GET    /api/reminders/        POST   /api/reminders/run/
 ```
 
-Two details worth knowing:
+Three details worth knowing:
 
-- **List and detail payloads differ.** `GET /vehicles/` returns flat expiry fields
-  and deliberately omits owner, chassis, engine and policy numbers; `GET
-  /vehicles/{id}/` nests `insurance`/`pucc` and includes them. Both are mapped to the
-  same nested shape so one `<DocumentStatus>` renders either. This is why a vehicle
-  card shows no insurer name — the list endpoint does not send one.
-- **A failed job is an HTTP 200.** `GET /jobs/{id}/` answers `{success: true, data:
-  {status: "failed", error_code: ...}}`, so `unwrap()` returns `data` regardless of
-  the `success` flag and the caller inspects `status`.
+- **List and detail payloads are identical.** Unlike the vehicle-lookup API this
+  replaced, there is nothing to withhold from a list: every field was typed in by the
+  user, and cards only ever hold four digits. One shape means a card and the detail
+  screen can never disagree about an item's status.
+- **The category catalogue comes from the server.** Field labels ("Registration
+  number" vs "Last 4 digits"), expiry presets and the card flag are all fetched from
+  `/api/items/categories/`. Adding a category is a backend-only change; the only
+  thing the client owns is the icon component, mapped from an icon *name* in
+  `src/utils/categories.js` with a fallback so an unknown category still renders.
+- **`POST /reminders/run/` is synchronous.** It answers with the finished summary
+  (`{sent, skipped_already_sent, failed, …}`), so the toast can say exactly what
+  happened rather than "queued".
 
-### Document status
+### Expiry status
 
-The backend computes `status`, `status_label` and `days_remaining` per document using
-the project timezone, and it is the source of truth. `src/utils/status.js` prefers
-those values and only falls back to a local calculation when a field is missing.
+The backend computes `status`, `status_label` and `days_remaining` for every date
+using the project timezone, and it is the source of truth. `src/utils/status.js`
+prefers those values and only falls back to a local calculation when a field is
+missing.
 
 ---
 
-## Background jobs (the important part)
+## No background jobs (the important part)
 
-Vehicle lookups hit a slow upstream service, so neither fetch nor refresh is ever
-awaited synchronously. The backend answers `202 Accepted` immediately and everything
-after that is polling:
+This app has no polling loop, no job list and no progress bar, because there is
+nothing asynchronous to follow. Adding an item is one request that returns the stored
+record; deleting is one request. The reminder check is one request that returns its
+own summary.
 
-```text
-POST /api/vehicles/fetch/  ──▶  { job_id, status: "queued" }
-                                        │
-                        GET /api/jobs/{job_id}/  every ~2.5s
-                                        │
-              queued ──▶ processing ──▶ completed  ──▶ load the vehicle
-                                    └──▶ failed     ──▶ friendly error + Try Again
-```
+That is worth stating explicitly because the previous version of this frontend was
+built around a `useJobPolling` hook, a jobs page and a three-step progress trail for
+a slow upstream lookup. All of it is gone along with the lookup.
 
-`src/hooks/useJobPolling.js` owns this and guarantees:
+Two consequences show up in the UI:
 
-- **one loop per job, never two.** The next request is scheduled only after the
-  previous one settles — a `setTimeout` chain rather than `setInterval`, which would
-  fire again while a slow request was still in flight;
-- it stops on `completed`, on `failed`, on a fatal HTTP status (401/403/404), after 5
-  consecutive network failures, and on an overall timeout;
-- the timer is cleared and late responses ignored on unmount or when `jobId` changes,
-  so a callback never fires for a job the UI has moved on from;
-- transient network blips are retried rather than failing the job — the Celery worker
-  keeps going regardless of what the browser can reach;
-- polling slows to half speed after 60s, because a job that slow is not about to
-  finish in the next two seconds.
-
-**No invented progress.** The job payload has no percentage, so the UI shows an
-indeterminate bar plus a three-step trail driven by the real status. Nothing ever
-crawls to a fake 99%.
-
-`useAsyncJob` (same file) wraps "start a job, follow it, then reload" and refuses to
-start a second job while one is running. `useVehicleRefresh` builds on it so only one
-refresh runs at a time; a click on another vehicle's refresh button meanwhile is
-refused with *"A vehicle update is already in progress."* rather than queueing a
-duplicate.
-
-Refreshing never clears what is on screen — existing data stays visible until the new
-data arrives.
+- **The upcoming schedule is fetched, not computed.** It used to be derived on the
+  client, because the backend only wrote a reminder row once its daily sweep claimed
+  one and there was nothing to read beforehand. The backend now derives the schedule
+  on request, so `src/utils/reminders.js` is down to wording helpers and the client
+  can no longer drift from what the sweep will actually do.
+- **The card number field is deliberately not capped at 4 characters.** A
+  `maxLength={4}` would let the browser silently keep the *first* four digits of a
+  pasted card number — the wrong four, with no warning. The whole value is allowed
+  through so the validator can reject it and explain why, on blur and again on
+  submit. The backend refuses it independently.
 
 ---
 
 ## Routes
 
-| Route            | Page                | Notes                                            |
-| ---------------- | ------------------- | ------------------------------------------------ |
-| `/login`         | Login               | The only public route.                           |
-| `/dashboard`     | Dashboard           | Counters + a card per vehicle.                   |
-| `/vehicles`      | Vehicles            | Full list with search and status filters.        |
-| `/vehicles/:id`  | Vehicle details     | Refresh (async) and delete (confirmed).          |
-| `/reminders`     | Reminders           | Upcoming schedule + delivery history.            |
-| `/jobs`          | Background jobs     | Recent fetches/refreshes, live while running.    |
-| `/settings`      | Settings            | Reminder email and per-document offsets.         |
+| Route          | Page          | Notes                                          |
+| -------------- | ------------- | ---------------------------------------------- |
+| `/login`       | Login         | The only public route.                         |
+| `/dashboard`   | Overview      | Counters, an urgency banner, the first 6 cards.|
+| `/items`       | Items         | Full list with search, status and category filters. |
+| `/items/:id`   | Item details  | Every date, the reminder history, edit, delete. |
+| `/reminders`   | Reminders     | Upcoming schedule + delivery history.          |
+| `/settings`    | Settings      | Reminder email and per-category offsets.       |
 
 All routes are lazy-loaded, so a signed-out visitor downloads little more than the
 login screen.
+
+### The add/edit form
+
+One `<ItemFormModal>` serves both, because the fields, the validation and the
+category rules are identical — only the endpoint and whether the category is still
+changeable differ. Splitting them would mean two places to keep the card rule right.
+
+Picking a category rebuilds the form: labels change, and the expiry rows are seeded
+with that category's defaults so the user starts from "fill in the dates" rather than
+a bare form. The identifier is cleared on a category change, since a registration
+number is not four digits. Presets are offered as buttons that add a correctly
+labelled row; "Another date" adds a free-form one, slugged client-side.
+
+### Dashboard counters
+
+The first counter counts items; the other three count **dates**. One vehicle with
+insurance, PUC and fitness is one item and three dates. Counting items as "valid"
+would hide a lapsed PUC behind a current insurance policy.
 
 ### Reminders page
 
 Two different sources, kept deliberately apart:
 
-- **Upcoming** is *derived on the client* from each vehicle's expiry dates and the
-  configured offsets, using the same rule as the backend sweep
-  (`send date = expiry − offset`, and expired documents are skipped). It has to be
-  computed, because the backend only writes a reminder record once the daily sweep
-  claims one — there is nothing to read beforehand.
+- **Upcoming** is the schedule from `GET /api/reminders/upcoming/`, derived by the
+  backend from every item's dates and the configured offsets. It also reports when
+  the daily check last ran.
 - **History** is the real record from `GET /api/reminders/`, including delivery
-  failures.
+  failures, which are shown rather than hidden — otherwise the user waits for an
+  email that is never coming.
 
 *Send Due Now* calls `POST /api/reminders/run/`, which **sends email**, so it is
 behind a confirmation dialog. It is idempotent — an already-sent reminder is not sent
-again.
+again — and the toast reports the returned summary.
 
-### Jobs page
-
-Refreshes itself every 5s **only while at least one job is `queued` or `processing`**.
-Once everything settles the polling stops, so a parked tab does not hammer the API.
+When the server has no mail credentials the page says so plainly, because the
+schedule still being accurate is not the same as reminders arriving.
 
 ---
 
@@ -239,11 +241,11 @@ Once everything settles the polling stops, so a parked tab does not hammer the A
 
 - **Only the app shell is precached.** Every `/api/` request is explicitly
   `NetworkOnly`, and `navigateFallbackDenylist` keeps API paths away from the SPA
-  fallback. Authenticated vehicle and owner data is never written to Cache Storage —
-  which matters on a shared device.
+  fallback. The user's items — card digits, document numbers — are never written to
+  Cache Storage, which matters on a shared device.
 - `display: standalone`, theme `#3b2ed4`, with `manifest.webmanifest` generated from
   the config in `vite.config.js`.
-- Deep links (`/vehicles/123`) resolve to `index.html` via `navigateFallback`.
+- Deep links (`/items/123`) resolve to `index.html` via `navigateFallback`.
 - **Install button**: `<InstallButton>` sits in the header on every page (labelled on
   desktop, icon-only on the mobile header), alongside the explanatory card on the
   dashboard. `beforeinstallprompt` is captured and replayed to open the browser's real
@@ -263,9 +265,11 @@ Once everything settles the polling stops, so a parked tab does not hammer the A
 
 ### Icons
 
-Real PNGs are committed under `public/icons/` — the app mark: a white car with a green
-check badge on the brand blue (`#3b2ed4`, the same value as `primary-600`, so the
-installed icon and the in-app buttons match):
+Real PNGs are committed under `public/icons/` — the app mark: a white calendar page
+with a green check badge on the brand blue (`#3b2ed4`, the same value as
+`primary-600`, so the installed icon and the in-app buttons match). A calendar rather
+than any one kind of item, because the app tracks documents, cards, policies and
+vehicle papers alike:
 
 ```text
 public/icons/icon-192.png          192×192  any
@@ -282,8 +286,8 @@ kept in step. To use your own images instead, drop files with those names and si
 into `public/icons/` and skip the script.
 
 The maskable variant deliberately differs: the square icon puts the badge in the
-top-right corner, while the maskable one tucks it against the car and re-centres the
-group, because Android may crop a maskable icon to a circle and the corner lockup
+top-right corner, while the maskable one tucks it against the calendar and re-centres
+the group, because Android may crop a maskable icon to a circle and the corner lockup
 reads as lopsided under that mask.
 
 ---
@@ -300,7 +304,7 @@ reads as lopsided under that mask.
    ```
 
 4. Deploy. `vercel.json` rewrites all non-asset paths to `/index.html`, so
-   `/vehicles/123` and `/settings` survive a hard refresh instead of 404ing, while
+   `/items/123` and `/settings` survive a hard refresh instead of 404ing, while
    `sw.js` and `manifest.webmanifest` are served with `must-revalidate` so an update
    is picked up promptly.
 
@@ -357,23 +361,21 @@ Never solve cross-origin auth by moving the JWT into `localStorage`.
 src/
 ├── api/              # Axios client + one module per resource. All mapping lives here.
 │   ├── client.js     # withCredentials, CSRF header, 401→refresh→retry, unwrap()
-│   ├── auth.js  vehicles.js  jobs.js  reminders.js  settings.js
+│   ├── auth.js  items.js  reminders.js  settings.js
 ├── components/
 │   ├── common/       # Button, Input, Modal, ConfirmDialog, Toast, Skeleton,
 │   │                 # EmptyState, ErrorState, Alert, Spinner, ProtectedRoute,
-│   │                 # OfflineBanner, InstallPrompt, ThemeToggle, PwaStatus
+│   │                 # DetailList, OfflineBanner, InstallPrompt, ThemeToggle, PwaStatus
 │   ├── layout/       # AppLayout, Sidebar (+ mobile drawer), MobileHeader,
 │   │                 # BottomNavigation, AccountMenu, Brand, navigation.js
-│   ├── vehicles/     # VehicleCard, VehicleForm, AddVehicleModal, VehicleDetails,
-│   │                 # DocumentCard, DocumentStatus, VehicleFetchProgress, DetailList
-│   ├── jobs/         # JobList, JobStatusBadge
+│   ├── items/        # ItemCard, ItemFormModal, ItemSummaryCards, ExpiryStatus
 │   └── reminders/    # ReminderList (history + upcoming)
 ├── context/          # AuthContext, ToastContext, ThemeContext
-├── hooks/            # useAuth, useToast, useTheme, useJobPolling (+ useAsyncJob),
-│                     # useVehicles, useVehicleRefresh, useOnlineStatus, usePwaInstall
-├── pages/            # Login, Dashboard, VehiclesPage, VehicleDetailsPage,
-│                     # RemindersPage, JobsPage, Settings, NotFound
-├── utils/            # date, status, vehicle, reminders, errors, cn
+├── hooks/            # useAuth, useToast, useTheme, useItems,
+│                     # useOnlineStatus, usePwaInstall
+├── pages/            # Login, Dashboard, ItemsPage, ItemDetailsPage,
+│                     # RemindersPage, Settings, NotFound
+├── utils/            # date, status, categories, identifier, reminders, errors, cn
 ├── App.jsx  main.jsx  pwa.js  index.css
 ```
 
@@ -389,7 +391,9 @@ use `parseApiDate`.
 
 `src/utils/errors.js` turns any failure into a safe sentence. Known error codes map to
 our own wording; the server message is shown only for codes where it adds real detail
-and is known to be user-safe (`INVALID_VEHICLE_NUMBER`, `VEHICLE_ALREADY_EXISTS`).
+and is known to be user-safe (`INVALID_VEHICLE_NUMBER`, `ITEM_ALREADY_EXISTS`,
+`INVALID_EXPIRY`, and `CARD_NUMBER_REJECTED` — whose server wording explains *why*
+only four digits are accepted, which is the entire point of refusing the input).
 Everything unrecognised, and every 5xx, falls back to a generic sentence — no raw
 messages, stack traces or upstream payloads reach the UI. 400/401/403/404/409/429/
 5xx, network failures and timeouts all have wording.
@@ -408,10 +412,10 @@ make any data loader keyed on it refetch on every toast.
 - Semantic landmarks, one `<h1>` per page, a skip link to `#main-content`.
 - Every input has a real `<label for>`; hints and errors are wired through
   `aria-describedby`, with `aria-invalid` on failure.
-- Icon-only buttons carry an `aria-label` (`aria-label="Refresh UP25AK4922"`).
+- Icon-only buttons carry an `aria-label` (`aria-label="Edit Honda CB Twister"`).
 - Dialogs: `role="dialog" aria-modal`, focus moved in on open, Tab/Shift+Tab trapped,
   Escape to close, focus restored to the trigger, page scroll locked. The delete
-  confirmation focuses **Cancel**, so a stray Enter cannot delete a vehicle.
+  confirmation focuses **Cancel**, so a stray Enter cannot delete an item.
 - Status is never colour alone — each state has its own icon and words.
 - One consistent `:focus-visible` ring; `prefers-reduced-motion` respected.
 - Toasts live in a polite live region and never steal focus.
@@ -434,17 +438,18 @@ toggle cycles light → dark → system and the choice is the only preference pe
 
 ## What was verified
 
-`npm install`, `npm run build` and `npm run lint` all run clean. The full flow was
-exercised in a browser against a stub implementing this contract: login (including a
-wrong password), the startup session check, dashboard, add vehicle with real job
-polling through `queued → processing → completed`, a failed job mapped to a friendly
-message with the number preserved for retry, the 409 "already saved" path with a link
-to the existing vehicle, vehicle details, async refresh, delete with confirmation,
-reminders (upcoming + history), the live jobs list, the offline banner, and 320px
-layout. Request logs confirmed `X-CSRF-Token` is sent on writes only, that cookies
-accompany every request, and that `document.cookie` exposes nothing but the CSRF
-token — the JWTs stay invisible to JavaScript.
+`npm install`, `npm run build` and `npm run lint` all run clean.
 
-Not yet exercised against the real Django backend end to end (that needs MongoDB,
-Redis and a Celery worker running locally); the contract was read from the backend
-source rather than assumed.
+The full flow was exercised in a browser against the **real Django backend** (run
+against an in-process `mongomock` database so no live cluster was touched): login,
+the startup session check, the dashboard with its counters and urgency banner, the
+items list with search and category filters, adding a credit card through the form,
+the item detail screen, the reminders page with the server-derived schedule and the
+delivery-failure history, and the settings screen saving per-category offsets and the
+upcoming schedule immediately reflecting them. Mobile was checked at 375px, including
+the bottom tab bar.
+
+The card guard was verified in the browser specifically: pasting a full 16-digit
+number is refused with an explanation, and only a genuine four-digit entry saves.
+That check found and fixed a real bug — a `maxLength={4}` on the field had been
+silently keeping the first four digits.
