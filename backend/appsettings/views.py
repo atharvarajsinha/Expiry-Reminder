@@ -9,10 +9,10 @@ from core.responses import success
 
 
 def _delivery_status():
-    """Whether email can actually be sent, and when the sweep last ran.
+    """Whether reminder email can actually be sent, and when it last ran.
 
-    Booleans only -- the settings screen needs to be able to say "email is not
-    configured" without the API ever handing out a key.
+    Booleans and dates only -- the settings screen needs to be able to say
+    "email is not configured" without the API ever handing out a key.
     """
     from reminders.services import sweep_state
 
@@ -21,7 +21,7 @@ def _delivery_status():
             django_settings.BREVO_API_KEY and django_settings.BREVO_SENDER_EMAIL
         ),
         "cron_configured": bool(django_settings.CRON_TOKEN),
-        "sweep_on_request": bool(django_settings.REMINDER_SWEEP_ON_REQUEST),
+        "reminder_hour": django_settings.REMINDER_HOUR,
         "expiring_soon_days": django_settings.EXPIRING_SOON_DAYS,
         "timezone": django_settings.TIME_ZONE,
         "sweep": sweep_state(),

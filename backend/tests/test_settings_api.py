@@ -20,6 +20,7 @@ class TestSettingsApi:
 
         assert delivery["email_configured"] is True
         assert delivery["cron_configured"] is True
+        assert delivery["reminder_hour"] == 9
         assert delivery["expiring_soon_days"] == 30
         assert delivery["timezone"] == "Asia/Kolkata"
         assert delivery["sweep"] == {"last_run_date": None, "last_run_at": None}

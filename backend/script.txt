@@ -3,11 +3,10 @@
 ===============================================================================
 
 The backend is ONE web service. There is no Redis, no Background Worker and no
-Celery Beat -- the API runs the daily reminder check itself, on the first
-request it handles each day.
+Celery Beat.
 
-Optionally you also add a Cron Job, which is what makes reminders arrive on
-days you never open the app.
+Nothing inside the app runs on a timer. Reminder email is sent when something
+OUTSIDE calls one URL. That something is an UptimeRobot monitor -- step 7.
 
 
 -------------------------------------------------------------------------------
@@ -27,8 +26,8 @@ Do these in order. Each step produces a value the next one needs:
                                v
    STEP 6  Verify it is up   -> your API URL
                                |
-                               +--> STEP 7  Cron Job (needs the API URL)
-                               +--> STEP 8  Frontend  (needs the API URL)
+                               +--> STEP 7  UptimeRobot (needs the API URL)
+                               +--> STEP 8  Frontend    (needs the API URL)
                                             |
                                             v
    STEP 9  Come back and set FRONTEND_URL + CORS_ALLOWED_ORIGINS
@@ -36,6 +35,9 @@ Do these in order. Each step produces a value the next one needs:
 Steps 2, 3 and 4 first because their values are environment variables you type
 into the web service form in step 5. Creating the service before you have them
 means a failed first deploy and a second trip through the settings page.
+
+Step 7 last because the monitor's URL contains the API address, which does not
+exist until step 5 has deployed.
 
 Step 9 exists because backend and frontend each need the other's URL. There is
 no way to know both up front: deploy the backend, deploy the frontend against
@@ -122,9 +124,10 @@ click "Generate" for each, or make them locally:
 
    SECRET_KEY       Django's signing key
    JWT_SECRET_KEY   signs your login tokens
-   CRON_TOKEN       shared secret for step 7; skip if you skip the cron job
+   CRON_TOKEN       the secret UptimeRobot puts in its URL
 
-Keep CRON_TOKEN somewhere you can find it again -- step 7 needs the SAME value.
+Keep CRON_TOKEN somewhere you can find it again -- step 7 pastes it into a URL.
+Make it long and URL-safe (the command above produces exactly that).
 
 
 ===============================================================================
@@ -146,7 +149,11 @@ Keep CRON_TOKEN somewhere you can find it again -- step 7 needs the SAME value.
    pip install -r requirements.txt
 
    Start Command:
-   gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 3 --timeout 120 --access-logfile - --error-logfile -
+   gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 3 --timeout 120 --access-logfile - --access-logformat '%(h)s %(l)s %(u)s %(t)s "%(m)s %(U)s %(H)s" %(s)s %(b)s' --error-logfile -
+
+   The --access-logformat is not decoration. It is the stock format with the
+   query string dropped, so the token in step 7's URL is not written into the
+   log line of every request.
 
    Health Check Path :  /api/health/      (with the trailing slash)
 
@@ -155,7 +162,8 @@ Now add the environment variables, using the values from steps 2, 3 and 4:
    DEBUG                 False
    SECRET_KEY            <from step 4>
    JWT_SECRET_KEY        <from step 4>
-   CRON_TOKEN            <from step 4, only if you are doing step 7>
+   CRON_TOKEN            <from step 4>
+   REMINDER_HOUR         9
    APP_USERNAME          <the username you will log in with>
    APP_PASSWORD          <the password you will log in with>
    MONGODB_URI           <from step 2>
@@ -179,8 +187,14 @@ Three of these are load-bearing and easy to get wrong:
        request after a successful login returns 401.
 
    TIME_ZONE
-       Decides which calendar day "7 days before" lands on. Wrong value means
-       reminders arrive a day early or late, forever.
+       Decides which calendar day "7 days before" lands on, AND which clock
+       REMINDER_HOUR is read against. Wrong value means reminders arrive a day
+       early or late, forever.
+
+   REMINDER_HOUR
+       The local hour the daily check is allowed to run at. 9 means "at or
+       after 09:00 Asia/Kolkata". This is what makes an every-five-minutes
+       monitor behave like a nine-in-the-morning job.
 
    REMINDER_EMAIL
        Where reminders go. You can change it later in the app's Settings
@@ -211,36 +225,80 @@ this locally, with the same MONGODB_URI in your local .env:
 
 
 ===============================================================================
- STEP 7 - CRON JOB  (optional but recommended)
+ STEP 7 - UPTIMEROBOT  (this is what sends the email)
 ===============================================================================
 
-Only possible now, because the command contains the URL from step 6.
+Only possible now: the URL below contains the API address from step 6.
 
-Without this, the daily check runs only when someone opens the app. With it,
-reminders go out whether or not anyone visits.
+WHAT YOU ARE SETTING UP, AND WHY IT LOOKS ODD
+---------------------------------------------
+UptimeRobot is an uptime monitor, not a scheduler. It pings a URL on an
+INTERVAL -- every 5 minutes on the free plan -- and it cannot be told "run at
+09:00". It also cannot send custom HTTP headers on the free plan, and it sends
+GET, not POST.
 
-   New +  ->  Cron Job  ->  same repo
+So the API takes care of the scheduling itself. The endpoint is:
 
-   Name              :  expiry-reminder-sweep
-   Root Directory    :  backend
-   Schedule          :  30 3 * * *
+  - cheap to call as often as you like,
+  - does the real work at most ONCE per calendar day,
+  - and not before REMINDER_HOUR (09:00).
 
-   Build Command:
-   pip install -r requirements.txt
+You are not scheduling anything here. You are giving the app a heartbeat and
+letting it decide when to act.
 
-   Command:
-   curl -fsS -X POST -H "X-Cron-Token: $CRON_TOKEN" https://<your-api>.onrender.com/api/reminders/run/
+SET IT UP
+---------
+   UptimeRobot -> + New monitor
 
-   Environment variable:
-   CRON_TOKEN        <the SAME value as the web service>
+   Monitor Type      :  HTTP(s)
+   Friendly Name     :  Expiry reminders daily check
+   URL               :  https://<your-api>.onrender.com/api/reminders/run/?token=<CRON_TOKEN>
+   Monitoring Interval: 5 minutes  (or anything; it makes no difference)
 
-Render cron schedules are in UTC.  30 3 * * *  =  09:00 India time.
+   Save.
 
-The cron job talks to the API over HTTP, so CRON_TOKEN is the only variable it
-needs -- no database URI, no Brevo key.
+Paste the CRON_TOKEN value from step 4 where <CRON_TOKEN> is. The token is in
+the URL because the free plan has no custom-headers field -- see the note at
+the bottom of this step.
 
-The sweep is idempotent. A cron ping and someone opening the app on the same
-morning still produce exactly one email.
+CHECK IT
+--------
+Paste the same URL into a browser. You get HTTP 200 and one of:
+
+   {"reason": "before_window"}   it is earlier than 09:00 today
+   {"reason": "ran", ...}        it just did today's check
+   {"reason": "already_ran"}     today's check is already done
+
+All three are 200 on purpose. If "not yet 9am" returned an error, UptimeRobot
+would decide your site was down and email you about it at 3am every night.
+
+In UptimeRobot the monitor should sit at "Up". If it flaps to "Down", open the
+URL by hand and read the response -- a 401 means the token in the URL does not
+match CRON_TOKEN on the web service.
+
+A NOTE ON THE TOKEN BEING IN THE URL
+------------------------------------
+Anything in a query string tends to end up in web server logs. This app strips
+query strings out of its gunicorn access log for exactly that reason, so the
+token is not written on every request.
+
+If your monitor CAN send custom headers (UptimeRobot's paid plans can, and so
+can Better Stack and Cron-Job.org on their free tiers), prefer that instead and
+leave the token out of the URL entirely:
+
+   URL     :  https://<your-api>.onrender.com/api/reminders/run/
+   Header  :  X-Cron-Token: <CRON_TOKEN>
+
+Both forms work. If the token ever leaks, change CRON_TOKEN on the web service
+and update the monitor -- the worst anyone can do with it is trigger a check
+that was going to happen anyway.
+
+A FREE-PLAN BONUS
+-----------------
+Render's free web services sleep after 15 minutes idle and take ~30 seconds to
+wake. A monitor pinging every 5 minutes keeps the service warm, so the app is
+fast when you open it. That is a side effect, not the reason -- but it is a
+real one.
 
 
 ===============================================================================
@@ -291,13 +349,23 @@ Save. Render redeploys automatically.
    4. Reminders screen -> "Send Due Now"
         Nothing due today is a correct result, not a failure
 
-   5. Sweep status:
+   5. When the daily check last ran:
         curl "https://<your-api>.onrender.com/api/health/?sweep=1"
 
-   6. Cron job (if you did step 7): click "Trigger Run". The log prints
+        Or read it in the app: Settings -> How reminders are sent -> Last ran.
+        That line is the one to glance at occasionally. If it stops moving,
+        the monitor has stopped firing.
 
-        {"success": true, "data": {"triggered_by": "cron", "due": 5,
-         "sent": 5, "skipped_already_sent": 0, "failed": 0}}
+   6. The monitor URL, in a browser:
+
+        {"success": true, "data": {"triggered_by": "cron",
+         "reason": "before_window", "runs_at_hour": 9}}
+
+        before_window / ran / already_ran are all correct answers depending
+        on the time of day. All of them are HTTP 200.
+
+   7. Tomorrow morning, after 09:00: check your inbox, and check that
+      "Last ran" shows today.
 
 
 ===============================================================================
@@ -311,8 +379,8 @@ Save. Render redeploys automatically.
     There is no admin and no whitenoise. It is not needed.
 
  3. Do NOT add a worker or a scheduler process.
-    There is no Celery app to run. The daily check lives inside the web
-    service (see backend/README.md section 4).
+    There is no Celery app to run, and nothing to schedule -- the app decides
+    when to act, the monitor just provides the heartbeat (README section 4).
 
 
 ===============================================================================
@@ -321,10 +389,11 @@ Save. Render redeploys automatically.
 
    Root Directory   backend
    Build            pip install -r requirements.txt
-   Web start        gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 3 --timeout 120 --access-logfile - --error-logfile -
+   Web start        gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 3 --timeout 120 --access-logfile - --access-logformat '%(h)s %(l)s %(u)s %(t)s "%(m)s %(U)s %(H)s" %(s)s %(b)s' --error-logfile -
    Health check     /api/health/
-   Cron command     curl -fsS -X POST -H "X-Cron-Token: $CRON_TOKEN" https://<your-api>.onrender.com/api/reminders/run/
-   Cron schedule    30 3 * * *
+   Monitor URL      https://<your-api>.onrender.com/api/reminders/run/?token=<CRON_TOKEN>
+   Monitor interval anything (5 min is fine -- the app gates itself)
+   Sends at         REMINDER_HOUR (09:00) in TIME_ZONE
    Seed data        python manage.py seed_items
 
 render.yaml in this folder is the same deployment as a blueprint, if you would
@@ -352,27 +421,40 @@ rather click "New Blueprint Instance" than fill the forms in by hand.
  CORS error in the browser console
      CORS_ALLOWED_ORIGINS does not exactly match the frontend URL   (step 9)
 
- Cron job returns 401
-     CRON_TOKEN differs between the web service and the cron job, or it is
-     unset on the web service -- which restricts that route to signed-in
-     users only
+ The monitor URL returns 401
+     The token in the URL does not match CRON_TOKEN on the web service, or
+     CRON_TOKEN is unset there -- which restricts that route to signed-in
+     users only. Check for a trailing space when you pasted it.
 
- No reminder emails, and the log says "0 due"
+ UptimeRobot says the monitor is DOWN
+     Open the URL by hand and read the body. A 401 is the token (above). A
+     502/503 on a free Render plan is usually a cold start -- the monitor
+     itself keeps the service warm once it is running.
+
+ No reminder emails, and the response says "due": 0
      Correct behaviour, not a bug. Nothing expires in exactly 30, 7, 1 or 0
      days today. Check the Reminders screen for the upcoming schedule.
+
+ No reminder emails, and "Last ran" is stale or empty
+     The monitor is not reaching the API. Check it exists, is not paused,
+     and that its URL still matches CRON_TOKEN.
+
+ Reminders arrive around midnight instead of 9am
+     REMINDER_HOUR is unset (or 0), or TIME_ZONE is wrong -- the hour is read
+     against TIME_ZONE, not UTC.
 
  No reminder emails, and the log says "failed"
      Reminders screen -> History. A failed row shows the attempt count and
      the next sweep retries it. Usually Brevo Authorised IPs still switched
      on, or a sender address that was never verified   (step 3)
 
- Reminders only arrive on days I open the app
-     That is the design without step 7. Add the cron job.
+ No reminders at all, ever
+     Step 7 was skipped. Without a monitor calling the URL, nothing sends
+     automatically -- only the "Send Due Now" button does.
 
  Reminder dates are one day out
      TIME_ZONE is wrong on the web service   (step 5)
 
- First request each morning is slow
-     Two things stack up on a free plan: the instance cold-starting, and the
-     daily sweep running on that first request. Adding the cron job (step 7)
-     means the sweep is usually already done by the time you open the app.
+ The app is slow to open the first time each day
+     Render free services sleep after 15 minutes idle. The monitor from step
+     7 keeps yours awake as a side effect.

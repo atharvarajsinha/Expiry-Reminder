@@ -8,7 +8,8 @@ Everything is entered by hand. There is no external data provider, and nothing
 is looked up anywhere.
 
 **There is also no broker, no worker and no scheduler.** One web process is the
-entire backend. How that works is [§4](#4-how-reminders-happen).
+entire backend; a free uptime monitor pings one URL and the app decides when to
+act. How that works is [§4](#4-how-reminders-happen).
 
 ---
 
@@ -48,7 +49,7 @@ Deliberate choices, and why:
 | Choice | Reason |
 | --- | --- |
 | **No Django ORM.** `DATABASES` is empty; there are no migrations, no `admin`, no `sessions`. | MongoDB is the only store. Half an ORM pointed at nothing is worse than none. |
-| **No Celery, no Redis.** | The only recurring job was "check once a day". A broker, a worker and a scheduler are three more processes to pay for and keep alive for one daily loop — so the loop rides on a request instead ([§4](#4-how-reminders-happen)). |
+| **No Celery, no Redis, no scheduler.** | The only recurring job was "check once a day". A broker, a worker and a scheduler are three more processes to pay for and keep alive for one daily loop — so an external pinger provides the heartbeat and the app decides when to act ([§4](#4-how-reminders-happen)). |
 | **No user table.** One username and password live in the environment; sessions are stateless JWTs. | It is a personal app. A user table would be one row forever. |
 | **Card numbers are refused, not truncated.** | Only the last four digits are ever accepted. Trimming a submitted PAN server-side would mean the full number had already crossed the wire and the logs. See `core/validators.py`. |
 | **One `items` collection, typed by `category`.** | A passport and a car differ in their labels, not their shape: both are a name, an identifier and a list of dates. Adding a category is one entry in `items/categories.py`. |
@@ -63,7 +64,7 @@ backend/
 ├── core/
 │   ├── dates.py       parsing, storage conversion, expiry status
 │   ├── errors.py      ApiError + the stable error codes
-│   ├── middleware.py  security headers, request log, ReminderSweepMiddleware
+│   ├── middleware.py  security headers, request logging
 │   ├── mongo.py       client, collections, indexes
 │   ├── responses.py   the {success, data} / {success, error} envelope
 │   └── validators.py  plate normalisation, the card-number guard
@@ -156,7 +157,7 @@ Two documents, both singletons:
 - `_id: "app_settings"` — `reminder_email` and `reminders`, a map of
   `category -> [days before expiry]` with a `default` key as the fallback.
 - `_id: "sweep_state"` — `last_run_date` and `last_run_at`. This is what makes
-  the daily check run exactly once a day ([§4](#4-how-reminders-happen)).
+  the daily check run exactly once a day, however often it is pinged ([§4](#4-how-reminders-happen)).
 
 ---
 
@@ -188,35 +189,58 @@ Only a reminder that is actually being sent gets written down.
 
 It is idempotent by construction: run it five times a day and one email goes out.
 
-### What triggers it
+### What triggers it, and why the gate is in the app
 
-**`ReminderSweepMiddleware`** (`core/middleware.py`) — the first API request of
-each calendar day runs the sweep. Three properties make that safe to hang off a
-user's request:
+Nothing in this process runs on a timer. The sweep happens when something
+outside calls `/api/reminders/run/` with `CRON_TOKEN`.
 
-- the day is **claimed atomically** with a `find_one_and_update` on
-  `sweep_state`, so exactly one request per day does the work and every other
-  request costs one indexed lookup that matches nothing;
-- it runs **after the response has been built**, so nothing the user is waiting
-  for is blocked behind an email send;
-- it **cannot fail a request** — a broken sweep is logged and swallowed, because
-  a database hiccup at 9am should not turn the dashboard into a 500.
+The obvious design is a cron daemon firing once at 09:00. In practice the free
+trigger people actually have is an **uptime monitor**, and a monitor is not a
+scheduler:
 
-Health checks, auth routes and preflights are skipped.
+| | cron | uptime monitor (UptimeRobot free) |
+| --- | --- | --- |
+| Fires | at a time you choose | on an interval — 5 minutes, minimum |
+| Method | whatever you write | GET, usually not changeable |
+| Custom headers | yes | paid plans only |
+| A non-2xx reply | logged | pages you at 3am to say the site is down |
 
-**The honest trade-off:** email only goes out on days the app is used. If that
-is not good enough, set `CRON_TOKEN` and point any free scheduler at
-`POST /api/reminders/run/` with an `X-Cron-Token` header — Render Cron,
-cron-job.org, a GitHub Action, a `curl` in your own crontab. Both triggers are
-the same idempotent sweep, so a cron ping and a page load on the same morning
-still produce one email.
+So the scheduling lives in `run_scheduled_sweep`, not in the caller. The
+endpoint is cheap to call constantly and does real work **at most once per
+calendar day, and not before `REMINDER_HOUR`** (default 9, read against
+`TIME_ZONE`). The day is claimed atomically with a `find_one_and_update` on
+`sweep_state`, so overlapping pings can never start two sweeps.
+
+Three consequences, each of them deliberate:
+
+- **Every tokened call returns 200**, including "it is not 9am yet"
+  (`reason: "before_window"`) and "already done today"
+  (`reason: "already_ran"`). A monitor reads any non-2xx as an outage.
+- **`GET` is accepted**, not only `POST`. It is not a safe method by HTTP's
+  definition — it sends email — but only for a caller holding the token.
+- **The token may travel as `?token=`** as well as `X-Cron-Token`, because a
+  free monitor cannot attach headers, and a reminder that never fires is worse
+  than a secret in a log. The gunicorn access log is configured to drop query
+  strings (`--access-logformat` in `entrypoint.sh`) so it is not written on
+  every request. Prefer the header wherever the tool supports it.
 
 ```bash
-curl -X POST -H "X-Cron-Token: $CRON_TOKEN" https://your-api/api/reminders/run/
+# Header form — use this if your tool can send headers.
+curl -H "X-Cron-Token: $CRON_TOKEN" https://your-api/api/reminders/run/
 ```
 
-Set `REMINDER_SWEEP_ON_REQUEST=False` if you want the cron to be the only
-trigger.
+```text
+# Query form — for UptimeRobot and friends. Point a monitor at this URL and
+# leave it on whatever interval it likes.
+https://your-api/api/reminders/run/?token=<CRON_TOKEN>
+```
+
+**If `CRON_TOKEN` is unset**, that route is signed-in-users only and nothing
+sends automatically — email goes out only when someone presses *Send Due Now*.
+
+That button calls `run_sweep` directly: ungated, and it deliberately does
+**not** stamp the daily marker, so pressing it at 08:00 cannot cause the 09:00
+run to be skipped.
 
 ---
 
@@ -268,7 +292,7 @@ Every value is read from the environment; nothing sensitive is hardcoded. See
 | Auth | `APP_USERNAME`, `APP_PASSWORD`, `JWT_*`, `AUTH_COOKIE_*`, `CSRF_*` |
 | MongoDB | `MONGODB_URI`, `MONGODB_DATABASE`, `MONGODB_TIMEOUT_MS` |
 | Email | `BREVO_API_KEY`, `BREVO_SENDER_EMAIL`, `BREVO_SENDER_NAME`, `REMINDER_EMAIL` |
-| Reminders | `REMINDER_OFFSETS`, `REMINDER_OFFSETS_<CATEGORY>`, `EXPIRING_SOON_DAYS`, `REMINDER_SWEEP_ON_REQUEST`, `CRON_TOKEN` |
+| Reminders | `REMINDER_OFFSETS`, `REMINDER_OFFSETS_<CATEGORY>`, `EXPIRING_SOON_DAYS`, `REMINDER_HOUR`, `CRON_TOKEN` |
 | CORS | `FRONTEND_URL`, `CORS_ALLOWED_ORIGINS`, `CSRF_TRUSTED_ORIGINS` |
 | Ops | `TIME_ZONE`, `LOG_LEVEL`, `THROTTLE_*`, `SECURE_SSL_REDIRECT` |
 
@@ -348,18 +372,21 @@ clashing `item_id` in `details`), `ITEM_NOT_FOUND`.
 | --- | --- | --- |
 | GET | `/api/reminders/upcoming/[?limit=]` | the derived schedule + `sweep` state |
 | GET | `/api/reminders/[?limit=&item_id=]` | what was sent or attempted |
-| POST | `/api/reminders/run/` | run the sweep now; returns the finished summary |
+| GET/POST | `/api/reminders/run/` | the daily check |
 
-`run/` answers synchronously with
-`{triggered_by, date, items_checked, due, sent, skipped_already_sent, failed}`.
-A signed-in caller may pass `{"for_date": "YYYY-MM-DD"}` to test the wiring
-without waiting for a real expiry; a cron caller may not.
+`run/` answers synchronously. A **tokened** caller gets
+`{triggered_by: "cron", ran, reason, runs_at_hour, …}`, where `reason` is one of
+`ran` / `before_window` / `already_ran` — always with HTTP 200. A **signed-in**
+caller gets an immediate ungated sweep and its summary
+`{items_checked, due, sent, skipped_already_sent, failed}`, and may pass
+`{"for_date": "YYYY-MM-DD"}` to test the wiring without waiting for a real
+expiry. A tokened caller may not.
 
 ### Settings and health
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET / PUT | `/api/settings/` | recipient + `reminders` (a `category -> [offsets]` map). The read-only `delivery` block reports whether email and cron are configured and when the sweep last ran — booleans and dates only, never a key. |
+| GET / PUT | `/api/settings/` | recipient + `reminders` (a `category -> [offsets]` map). The read-only `delivery` block reports whether email and the daily trigger are configured, the send hour, and when the check last ran — booleans, numbers and dates only, never a key. |
 | GET | `/api/health/[?sweep=1]` | public; `503` when MongoDB is unreachable |
 
 An empty offset list is a real choice ("never email me about cards") and is
@@ -409,10 +436,13 @@ What is actually asserted, beyond the CRUD happy paths:
 - **`tests/test_reminders.py`** — reminders fire on exactly the offset days and
   nothing between them; expired dates never re-email; running the sweep twice
   sends one email; a failed send is retried on the next run; one failure does
-  not stop the others; a cron caller cannot backdate the sweep.
-- **`tests/test_sweep_middleware.py`** — the scheduler replacement: it fires
-  once per day off a real request, a sweep that raises does not fail the
-  response it is riding on, and health and auth routes do not trigger it.
+  not stop the others; a tokened caller cannot backdate the sweep.
+- **`TestScheduledSweep`** — the gate that turns an interval pinger into a 9am
+  job: nothing before `REMINDER_HOUR`, exactly one sweep when pinged hourly
+  from 08:00 to midnight, the next day runs again, and a manual *Send Due Now*
+  does not consume the day's slot.
+- **The monitor contract** — `GET` works, `?token=` works, a wrong token is a
+  401, and an early ping is a **200** rather than an error.
 
 ---
 
@@ -428,9 +458,10 @@ Two services: MongoDB and the web app. That is all there is to run.
 
 ## 11. Deploying
 
-`render.yaml` is a working blueprint: one web service, plus an optional daily
-cron job that hits `/api/reminders/run/` with `X-Cron-Token`. Drop the cron
-service if you are content for email to depend on the app being opened.
+`render.yaml` is a working blueprint: one web service, and nothing else. The
+daily trigger is not a Render service at all — point a free uptime monitor at
+`/api/reminders/run/?token=<CRON_TOKEN>` and leave it on its default interval.
+`script.txt` walks through that with UptimeRobot.
 
 MongoDB comes from Atlas — set `MONGODB_URI`. `railway.json` deploys the same
 image on Railway.
@@ -441,5 +472,9 @@ Checklist for any host:
 - [ ] `ALLOWED_HOSTS` and `CORS_ALLOWED_ORIGINS` set to the real domains
 - [ ] `AUTH_COOKIE_SECURE=True` (and `SAMESITE=None` if cross-site)
 - [ ] `MONGODB_URI` pointing at Atlas, with the host's egress IPs allowed
-- [ ] `TIME_ZONE` set to yours, or reminders land on the wrong day
-- [ ] `CRON_TOKEN` set if reminders must arrive on days you do not open the app
+- [ ] `TIME_ZONE` set to yours — reminders land on the wrong day without it,
+      and `REMINDER_HOUR` is read against it
+- [ ] `CRON_TOKEN` set, and a monitor pointed at `/api/reminders/run/`; without
+      one nothing sends automatically
+- [ ] gunicorn started with the `--access-logformat` from `entrypoint.sh`, so a
+      `?token=` URL is not written to the log of every request

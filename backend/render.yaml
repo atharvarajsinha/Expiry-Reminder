@@ -1,11 +1,15 @@
-# Render blueprint: one web service, and one optional cron job.
+# Render blueprint: one web service. That is the whole backend.
 #
-# There is no Redis, no worker and no Celery Beat. The web service runs the
-# daily reminder sweep on the first request of each day; the cron job below is
-# what makes reminders arrive on days nobody opens the app. Drop it if you are
-# happy for email to depend on the app being visited.
+# There is no Redis, no worker, no Celery Beat and no Render Cron Job. Nothing
+# in this image runs on a timer.
 #
-# MongoDB comes from MongoDB Atlas (set MONGODB_URI).
+# Reminder email is sent when something outside calls
+# GET /api/reminders/run/?token=<CRON_TOKEN>. Point a free uptime monitor
+# (UptimeRobot, Better Stack, Cron-Job.org) at that URL and leave it on its
+# default interval: the endpoint itself enforces "once a day, not before
+# REMINDER_HOUR", so being pinged every five minutes is harmless.
+#
+# See script.txt for the monitor setup. MongoDB comes from Atlas.
 services:
   - type: web
     name: expiry-reminder-api
@@ -21,9 +25,13 @@ services:
         generateValue: true
       - key: JWT_SECRET_KEY
         generateValue: true
-      # The shared secret the cron job below presents as X-Cron-Token.
+      # The secret the uptime monitor presents. Copy the generated value into
+      # the monitor's URL after the first deploy.
       - key: CRON_TOKEN
         generateValue: true
+      # Local hour at or after which the daily check may run.
+      - key: REMINDER_HOUR
+        value: "9"
       - key: APP_USERNAME
         sync: false
       - key: APP_PASSWORD
@@ -42,26 +50,10 @@ services:
         sync: false
       - key: CORS_ALLOWED_ORIGINS
         sync: false
+      # Decides which calendar day "7 days before" lands on.
       - key: TIME_ZONE
         value: Asia/Kolkata
       - key: AUTH_COOKIE_SECURE
         value: "True"
       - key: AUTH_COOKIE_SAMESITE
         value: None
-
-  # 09:00 Asia/Kolkata == 03:30 UTC. Render cron schedules are UTC.
-  - type: cron
-    name: expiry-reminder-sweep
-    runtime: docker
-    plan: starter
-    schedule: "30 3 * * *"
-    dockerfilePath: ./Dockerfile
-    dockerCommand: >-
-      sh -c "curl -fsS -X POST -H \"X-Cron-Token: $CRON_TOKEN\" $API_URL/api/reminders/run/"
-    envVars:
-      # Copy the generated value from the web service, and set API_URL to its
-      # public URL (https://expiry-reminder-api.onrender.com).
-      - key: CRON_TOKEN
-        sync: false
-      - key: API_URL
-        sync: false
