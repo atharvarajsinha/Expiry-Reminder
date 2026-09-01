@@ -11,11 +11,20 @@
  * CSRF
  * ----
  * Because cookies travel automatically, the backend uses the classic
- * double-submit defence: alongside the HttpOnly pair it sets a *readable*
- * `csrf_token` cookie whose value must be echoed in the `X-CSRF-Token` header
- * on every unsafe request. That is done in the request interceptor below.
- * Reading this cookie is intentional and safe - it is not a credential on its
- * own, it only proves the request came from our own page.
+ * double-submit defence: the value it puts in the `csrf_token` cookie must be
+ * echoed in the `X-CSRF-Token` header on every unsafe request.
+ *
+ * That value is kept **in memory**, not read back from the cookie. Reading the
+ * cookie only works when the app and the API share a hostname; in a real
+ * deployment (app on Vercel, API on Render) the cookie is third-party and
+ * `document.cookie` cannot see it at all - so every write failed with
+ * CSRF_FAILED while every read carried on working.
+ *
+ * The value therefore comes from the response body of `/auth/login/`,
+ * `/auth/refresh/` and `/auth/me/`; the cookie is only a fallback for
+ * same-host setups. It is not a credential on its own - it proves the request
+ * came from our own page - which is exactly why it is safe for JavaScript to
+ * hold when the session tokens are not.
  *
  * 401 handling
  * ------------
@@ -36,6 +45,27 @@ const CSRF_HEADER_NAME = import.meta.env.VITE_CSRF_HEADER_NAME || 'X-CSRF-Token'
 
 const UNSAFE_METHODS = new Set(['post', 'put', 'patch', 'delete']);
 const REQUEST_TIMEOUT_MS = 20000;
+
+// ---------------------------------------------------------------------------
+// CSRF token store
+// ---------------------------------------------------------------------------
+// Module-level rather than React state: the request interceptor is not a
+// component and has to read the current value synchronously.
+let csrfToken = null;
+
+/** Remember the CSRF value the backend just issued. */
+export function setCsrfToken(token) {
+  csrfToken = typeof token === 'string' && token ? token : null;
+}
+
+export function clearCsrfToken() {
+  csrfToken = null;
+}
+
+/** In-memory value first; the cookie is a same-host fallback. */
+function currentCsrfToken() {
+  return csrfToken || readCookie(CSRF_COOKIE_NAME);
+}
 
 /**
  * Endpoints that must never trigger the refresh-and-retry dance: the auth
@@ -102,7 +132,7 @@ function emitUnauthorized() {
 client.interceptors.request.use((config) => {
   const method = (config.method || 'get').toLowerCase();
   if (UNSAFE_METHODS.has(method)) {
-    const token = readCookie(CSRF_COOKIE_NAME);
+    const token = currentCsrfToken();
     if (token) {
       config.headers[CSRF_HEADER_NAME] = token;
     }
@@ -120,10 +150,17 @@ let refreshPromise = null;
 function refreshSession() {
   if (!refreshPromise) {
     // The refresh token rides along in its own HttpOnly cookie, so the body
-    // stays empty. Rotation also issues a fresh csrf_token cookie.
-    refreshPromise = client.post('/auth/refresh/', {}).finally(() => {
-      refreshPromise = null;
-    });
+    // stays empty. Rotation issues a brand new CSRF value, so capture it - the
+    // old one stops being accepted the moment this succeeds.
+    refreshPromise = client
+      .post('/auth/refresh/', {})
+      .then((response) => {
+        setCsrfToken(response?.data?.data?.csrf_token);
+        return response;
+      })
+      .finally(() => {
+        refreshPromise = null;
+      });
   }
   return refreshPromise;
 }
@@ -133,9 +170,18 @@ client.interceptors.response.use(
   async (error) => {
     const config = error?.config;
     const status = error?.response?.status;
+    const code = error?.response?.data?.error?.code;
+
+    // A 403 CSRF_FAILED means our CSRF value is stale, or was never primed -
+    // after a page reload, say. A refresh issues a fresh one, so the same
+    // recover-once-and-retry path repairs it.
+    const staleCsrf = status === 403 && code === 'CSRF_FAILED';
 
     const recoverable =
-      status === 401 && config && !config.__isRetry && !isNoRetryPath(config.url);
+      (status === 401 || staleCsrf) &&
+      config &&
+      !config.__isRetry &&
+      !isNoRetryPath(config.url);
 
     if (!recoverable) {
       // A 401 we cannot recover from means the session is really gone.

@@ -324,7 +324,7 @@ valid `X-Cron-Token` in place of a session.
 | POST | `/api/auth/login/` | `{username, password}` → sets `access_token`, `refresh_token` (HttpOnly) and a readable `csrf_token` |
 | POST | `/api/auth/refresh/` | rotates the pair from the refresh cookie |
 | POST | `/api/auth/logout/` | clears the cookies |
-| GET | `/api/auth/me/` | the current session |
+| GET | `/api/auth/me/` | the current session, and the `csrf_token` to use. Answers **200** with `authenticated: false` for a signed-out visitor rather than 401 — an expired or invalid token still 401s, which is what triggers refresh-and-retry. |
 
 ### Items
 
@@ -398,11 +398,22 @@ stored as such, not treated as unset.
 
 Tokens live in HttpOnly cookies, so JavaScript cannot read them. Because
 cookies travel automatically, unsafe requests use the classic double-submit
-defence: alongside the HttpOnly pair the backend sets a **readable**
-`csrf_token` cookie whose value must come back in the `X-CSRF-Token` header.
+defence: the CSRF value must come back in the `X-CSRF-Token` header.
 
-Client requirements: `withCredentials: true`, echo the CSRF cookie on
-POST/PUT/PATCH/DELETE, and on a `401` call `/api/auth/refresh/` once and retry.
+**The client must not read that value from the cookie.** The backend does set a
+readable `csrf_token` cookie, but it is only readable when the app and the API
+share a hostname. In a real deployment — app on Vercel, API on Render — that
+cookie is third-party and `document.cookie` cannot see it, so every write fails
+with `CSRF_FAILED` while every read carries on working.
+
+Take it from the **response body** instead. `/api/auth/login/`,
+`/api/auth/refresh/` and `/api/auth/me/` all return `csrf_token`, and the last
+of those is what lets a reloaded page recover it without a re-login. Hold it in
+memory, not in storage.
+
+Client requirements: `withCredentials: true`; send `X-CSRF-Token` on
+POST/PUT/PATCH/DELETE from the value the API returned; on a `401` — or a `403`
+whose code is `CSRF_FAILED` — call `/api/auth/refresh/` once and retry.
 
 For a cross-site deployment (frontend on Vercel, API on Render):
 

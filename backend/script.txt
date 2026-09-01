@@ -443,10 +443,23 @@ rather click "New Blueprint Instance" than fill the forms in by hand.
      REMINDER_HOUR is unset (or 0), or TIME_ZONE is wrong -- the hour is read
      against TIME_ZONE, not UTC.
 
- No reminder emails, and the log says "failed"
-     Reminders screen -> History. A failed row shows the attempt count and
-     the next sweep retries it. Usually Brevo Authorised IPs still switched
-     on, or a sender address that was never verified   (step 3)
+ No reminder emails, and the response says "failed"
+     The app tells you why. Reminders screen -> History: a failed row shows
+     the exact reason and what to do about it. "Send Due Now" reports the
+     same reason in its toast. The three that actually happen:
+
+       "Email delivery is not configured (missing: ...)"
+           BREVO_API_KEY / BREVO_SENDER_EMAIL are not set on the web service
+
+       "The email service returned an error (HTTP 401)"
+           Brevo -> Security -> Authorised IPs is still switched on, so it is
+           refusing the server   (step 3)
+
+       "The email service returned an error (HTTP 400)"
+           The sender address is not verified under Brevo -> Senders
+
+     Nothing is lost while it is broken: the reminder row stays unsent and
+     the next daily check retries it.
 
  No reminders at all, ever
      Step 7 was skipped. Without a monitor calling the URL, nothing sends

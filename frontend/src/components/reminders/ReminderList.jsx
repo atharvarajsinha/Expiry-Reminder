@@ -4,7 +4,12 @@ import { AlertTriangle, CalendarClock, MailCheck } from 'lucide-react';
 import { Skeleton, SkeletonGroup } from '../common/Skeleton.jsx';
 import { cn } from '../../utils/cn.js';
 import { formatDate, formatDateTime } from '../../utils/date.js';
-import { offsetLabel, reminderTypeLabel, sendDistanceLabel } from '../../utils/reminders.js';
+import {
+  deliveryHint,
+  offsetLabel,
+  reminderTypeLabel,
+  sendDistanceLabel,
+} from '../../utils/reminders.js';
 
 /** The name of the date a reminder is about, e.g. "Insurance", "Card expiry". */
 function ExpiryChip({ label }) {
@@ -75,9 +80,21 @@ function ReminderHistoryItem({ reminder }) {
           </p>
 
           {failed ? (
-            <p className="mt-2 text-sm text-red-600 dark:text-red-400">
-              Delivery failed. The next reminder check will try again.
-            </p>
+            <div className="mt-2 text-sm text-red-600 dark:text-red-400">
+              {/* The server records a specific reason on every failed attempt
+                  and it is written to be safe to display - a status code, never
+                  a response body or a key. Hiding it behind "delivery failed"
+                  left the only person who can fix it with nothing to go on. */}
+              <p>{reminder.lastError || 'Delivery failed.'}</p>
+              {deliveryHint(reminder.lastError) ? (
+                <p className="mt-1 text-slate-500 dark:text-slate-400">
+                  {deliveryHint(reminder.lastError)}
+                </p>
+              ) : null}
+              <p className="mt-1 text-xs text-slate-400 dark:text-slate-500">
+                The next daily check will try again.
+              </p>
+            </div>
           ) : null}
         </div>
 

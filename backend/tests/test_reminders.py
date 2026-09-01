@@ -236,6 +236,60 @@ class TestSweep:
         assert record["sent"] is True
         assert record["attempts"] == 2
 
+    def test_the_summary_says_why_it_failed(self, monkeypatch):
+        # "3 failed" with no reason is the difference between a user who can
+        # fix their Brevo config and one who cannot.
+        make_item([("insurance", TODAY + dt.timedelta(days=7))])
+
+        def refuse(item, entry, recipient):
+            raise EmailError(
+                "EMAIL_SEND_FAILED",
+                "The email service returned an error (HTTP 401).",
+                502,
+            )
+
+        monkeypatch.setattr(services, "send_reminder_email", refuse)
+
+        summary = services.run_sweep(today=TODAY)
+
+        assert summary["failed"] == 1
+        assert summary["failures"] == [
+            "The email service returned an error (HTTP 401)."
+        ]
+
+    def test_one_reason_is_reported_once_however_many_items_hit_it(
+        self, monkeypatch
+    ):
+        # A bad key fails every item identically; repeating it N times would
+        # bury the answer rather than give it.
+        for name in ("A", "B", "C"):
+            make_item(
+                [("valid_until", TODAY + dt.timedelta(days=7))],
+                category="document",
+                name=name,
+            )
+
+        monkeypatch.setattr(
+            services,
+            "send_reminder_email",
+            lambda item, entry, recipient: (_ for _ in ()).throw(
+                EmailError("EMAIL_NOT_CONFIGURED", "Email delivery is not configured.", 503)
+            ),
+        )
+
+        summary = services.run_sweep(today=TODAY)
+
+        assert summary["failed"] == 3
+        assert summary["failures"] == ["Email delivery is not configured."]
+
+    def test_a_clean_run_reports_no_failures(self, sent_emails):
+        make_item([("insurance", TODAY + dt.timedelta(days=7))])
+
+        summary = services.run_sweep(today=TODAY)
+
+        assert summary["sent"] == 1
+        assert summary["failures"] == []
+
     def test_one_failure_does_not_stop_the_others(self, monkeypatch):
         make_item([("insurance", TODAY + dt.timedelta(days=7))], identifier="UP25AK4922")
         make_item(
@@ -474,6 +528,67 @@ class TestBrevoDelivery:
             send_reminder_email(self._item(), self._entry(), "owner@example.com")
         assert excinfo.value.code == "EMAIL_SEND_FAILED"
 
+    def test_brevo_own_reason_is_included(self, monkeypatch, fake_response):
+        # HTTP 401 alone cannot be acted on: Brevo returns it both for a key it
+        # does not know and for a key used from an IP that is not allow-listed.
+        # Its message says which, and even names the IP.
+        monkeypatch.setattr(
+            "reminders.email_service.requests.post",
+            lambda *a, **k: fake_response(
+                401,
+                {"code": "unauthorized", "message": "Unauthorized IP address 49.36.1.2"},
+            ),
+        )
+
+        with pytest.raises(EmailError) as excinfo:
+            send_reminder_email(self._item(), self._entry(), "owner@example.com")
+
+        assert "HTTP 401" in excinfo.value.message
+        assert "Unauthorized IP address 49.36.1.2" in excinfo.value.message
+
+    def test_the_reason_is_capped_and_flattened(self, monkeypatch, fake_response):
+        monkeypatch.setattr(
+            "reminders.email_service.requests.post",
+            lambda *a, **k: fake_response(
+                400, {"message": "x\n  y " + "z" * 500}
+            ),
+        )
+
+        with pytest.raises(EmailError) as excinfo:
+            send_reminder_email(self._item(), self._entry(), "owner@example.com")
+
+        assert "\n" not in excinfo.value.message
+        assert len(excinfo.value.message) < 300
+
+    def test_a_reason_that_echoed_the_key_is_redacted(
+        self, monkeypatch, fake_response
+    ):
+        # Brevo does not do this today. If it ever did, the key must not reach
+        # the stored error or the screen showing it.
+        monkeypatch.setattr(
+            "reminders.email_service.requests.post",
+            lambda *a, **k: fake_response(
+                401, {"message": "bad key test-brevo-key supplied"}
+            ),
+        )
+
+        with pytest.raises(EmailError) as excinfo:
+            send_reminder_email(self._item(), self._entry(), "owner@example.com")
+
+        assert "test-brevo-key" not in excinfo.value.message
+        assert "***" in excinfo.value.message
+
+    def test_a_non_json_error_body_is_ignored(self, monkeypatch, fake_response):
+        monkeypatch.setattr(
+            "reminders.email_service.requests.post",
+            lambda *a, **k: fake_response(502, None, text="<html>gateway</html>"),
+        )
+
+        with pytest.raises(EmailError) as excinfo:
+            send_reminder_email(self._item(), self._entry(), "owner@example.com")
+
+        assert excinfo.value.message == "The email service returned an error (HTTP 502)."
+
     def test_an_error_response_never_leaks_the_key(self, monkeypatch, fake_response):
         monkeypatch.setattr(
             "reminders.email_service.requests.post",
@@ -619,7 +734,11 @@ class TestReminderApi:
     ):
         # A monitor treats any non-2xx as the site being down. "It is not 9am
         # yet" must not page the user at three in the morning.
-        settings_override(CRON_TOKEN="test-cron-token", REMINDER_HOUR=23)
+        #
+        # The clock is pinned to 03:00: reading the real one would make this
+        # pass or fail depending on when the suite runs.
+        settings_override(CRON_TOKEN="test-cron-token")
+        monkeypatch.setattr(services, "local_now", lambda: at(3, day=today_local()))
         make_item([("insurance", today_local() + dt.timedelta(days=7))])
 
         response = api_client.get("/api/reminders/run/?token=test-cron-token")
@@ -627,6 +746,22 @@ class TestReminderApi:
         assert response.status_code == 200
         assert response.data["data"]["reason"] == "before_window"
         assert sent_emails == []
+
+    def test_a_ping_inside_the_window_runs_and_reports_what_it_sent(
+        self, api_client, sent_emails, settings_override, monkeypatch
+    ):
+        settings_override(CRON_TOKEN="test-cron-token")
+        monkeypatch.setattr(services, "local_now", lambda: at(9, day=today_local()))
+        make_item([("insurance", today_local() + dt.timedelta(days=7))])
+
+        first = api_client.get("/api/reminders/run/?token=test-cron-token")
+        second = api_client.get("/api/reminders/run/?token=test-cron-token")
+
+        assert first.data["data"]["reason"] == "ran"
+        assert first.data["data"]["sent"] == 1
+        # The monitor keeps pinging; the rest of the day is a cheap no-op.
+        assert second.data["data"]["reason"] == "already_ran"
+        assert len(sent_emails) == 1
 
     def test_cron_cannot_backdate_the_sweep(
         self, api_client, sent_emails, settings_override

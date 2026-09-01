@@ -113,14 +113,36 @@ class LogoutView(APIView):
 
 
 class MeView(APIView):
-    """``GET /api/auth/me/`` -- confirms the session is still valid."""
+    """``GET /api/auth/me/`` -- confirms the session, and re-issues the CSRF value.
 
+    Two things here are deliberate.
+
+    **It answers 200 for a signed-out visitor**, with ``authenticated: false``,
+    rather than 401. Asking "am I signed in?" and being told "no" is an answer,
+    not a failure -- and a 401 made the browser log a red console error on
+    every visit to the login page. An *invalid or expired* token still raises
+    401 from the authentication class before this runs, which is what triggers
+    the client's refresh-and-retry.
+
+    **It returns ``csrf_token``.** The frontend cannot always read the CSRF
+    cookie: when the API and the app are on different domains, that cookie is
+    third-party and ``document.cookie`` cannot see it. Handing the value back
+    here lets a reloaded page recover it without a full re-login.
+    """
+
+    permission_classes = [AllowAny]
     throttle_scope = "read"
 
     def get(self, request):
+        if not request.user:
+            return success({"authenticated": False, "username": None})
+
         return success(
             {
                 "username": request.user.username,
                 "authenticated": True,
+                # Read back from the access token this request was authorised
+                # with, so it always matches what the server will expect.
+                "csrf_token": request.user.csrf_token,
             }
         )

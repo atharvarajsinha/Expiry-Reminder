@@ -291,6 +291,18 @@ def upcoming_reminders(today=None, limit=100):
 # ---------------------------------------------------------------------------
 # The sweep
 # ---------------------------------------------------------------------------
+# At most this many distinct reasons travel back in a summary. One bad
+# credential produces the same message for every item, and a caller only needs
+# to see it once.
+MAX_REPORTED_FAILURES = 3
+
+
+def _record_failure(summary, message):
+    failures = summary["failures"]
+    if message not in failures and len(failures) < MAX_REPORTED_FAILURES:
+        failures.append(message)
+
+
 def run_sweep(today=None):
     """Check every item and send whatever is due.  Safe to run repeatedly."""
     today = today or today_local()
@@ -305,6 +317,11 @@ def run_sweep(today=None):
         "sent": 0,
         "skipped_already_sent": 0,
         "failed": 0,
+        # Distinct reasons, so "3 failed" can say *why* instead of leaving the
+        # user to guess. These messages are written by `email_service` and are
+        # deliberately safe to show: a status code, never a response body and
+        # never the API key.
+        "failures": [],
     }
 
     if not recipient:
@@ -341,6 +358,7 @@ def run_sweep(today=None):
                 message_id = send_reminder_email(item, entry, recipient)
             except EmailError as exc:
                 summary["failed"] += 1
+                _record_failure(summary, exc.message)
                 mark_attempt_failed(reminder, exc.message)
                 logger.error(
                     "Reminder email failed: item=%s expiry=%s type=%s (%s)",
@@ -352,9 +370,9 @@ def run_sweep(today=None):
                 continue
             except Exception as exc:  # pragma: no cover - unexpected
                 summary["failed"] += 1
-                mark_attempt_failed(
-                    reminder, "Unexpected error: %s" % type(exc).__name__
-                )
+                message = "Unexpected error: %s" % type(exc).__name__
+                _record_failure(summary, message)
+                mark_attempt_failed(reminder, message)
                 logger.exception("Unexpected error while sending a reminder email")
                 continue
 
@@ -400,6 +418,16 @@ def reminder_hour():
     return getattr(django_settings, "REMINDER_HOUR", 9)
 
 
+def local_now():
+    """Now, in the project timezone.
+
+    A named seam rather than an inline call so tests can pin the clock: the
+    scheduling gate is entirely about what hour it is, and a test that depends
+    on when the suite happens to run is a test that fails once a day.
+    """
+    return dt.datetime.now(tz=project_timezone())
+
+
 def claim_today(today):
     """Atomically win the right to run today's sweep.
 
@@ -437,7 +465,7 @@ def run_scheduled_sweep(now=None):
     * ``before_window`` -- it is earlier than ``REMINDER_HOUR`` today;
     * ``already_ran``   -- today's sweep is already done.
     """
-    now = now or dt.datetime.now(tz=project_timezone())
+    now = now or local_now()
     today = now.date()
     hour = reminder_hour()
 

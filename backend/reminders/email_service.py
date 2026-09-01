@@ -28,6 +28,43 @@ class EmailError(ApiError):
     """Raised when the reminder email could not be handed to Brevo."""
 
 
+# Brevo error bodies look like {"code": "unauthorized", "message": "..."}.
+# Only these two fields are ever read, and only this much of the message.
+MAX_UPSTREAM_REASON = 200
+
+
+def upstream_reason(response):
+    """Brevo's own explanation of a rejection, or ``None``.
+
+    A bare status code is not actionable: Brevo answers 401 both for a key it
+    does not recognise and for a key used from an IP that is not on the
+    account's allow-list, and those have completely different fixes. Its
+    message says which -- it even names the offending IP -- so throwing that
+    away leaves the user guessing at the one moment they need to know.
+
+    Only the ``code`` and ``message`` fields are read, capped in length, and
+    the API key is redacted on the way out in case a future error shape ever
+    echoes the request back.
+    """
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    if not isinstance(body, dict):
+        return None
+
+    message = body.get("message")
+    if not isinstance(message, str) or not message.strip():
+        return None
+
+    reason = " ".join(message.split())[:MAX_UPSTREAM_REASON]
+
+    key = settings.BREVO_API_KEY
+    if key and key in reason:
+        reason = reason.replace(key, "***")
+    return reason
+
+
 def _require_configuration(recipient):
     missing = []
     if not settings.BREVO_API_KEY:
@@ -137,13 +174,16 @@ def send_reminder_email(item, entry, recipient):
         )
 
     if response.status_code not in (200, 201, 202):
-        # Status code only: the body may echo request details.
-        logger.error("Brevo rejected the reminder (HTTP %s)", response.status_code)
-        raise EmailError(
-            ErrorCode.EMAIL_SEND_FAILED,
-            "The email service returned an error (HTTP %s)." % response.status_code,
-            status_code=502,
+        reason = upstream_reason(response)
+        logger.error(
+            "Brevo rejected the reminder (HTTP %s)%s",
+            response.status_code,
+            ": %s" % reason if reason else "",
         )
+        detail = "The email service returned an error (HTTP %s)." % response.status_code
+        if reason:
+            detail = "%s %s" % (detail, reason)
+        raise EmailError(ErrorCode.EMAIL_SEND_FAILED, detail, status_code=502)
 
     message_id = None
     try:
