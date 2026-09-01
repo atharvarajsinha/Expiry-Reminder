@@ -35,7 +35,6 @@ from pymongo.errors import PyMongoError
 from core import mongo
 from core.dates import (
     expiry_status,
-    from_storage,
     iso_date,
     iso_datetime,
     now_utc,
@@ -402,16 +401,3 @@ def serialize(item, today=None):
         "created_at": iso_datetime(item.get("created_at")),
         "updated_at": iso_datetime(item.get("updated_at")),
     }
-
-
-def expiry_entry(item, expiry_key):
-    """One stored expiry entry by key, or ``None``."""
-    for entry in item.get("expiries") or []:
-        if entry.get("key") == expiry_key:
-            return entry
-    return None
-
-
-def expiry_date_for(item, expiry_key):
-    entry = expiry_entry(item, expiry_key)
-    return from_storage(entry.get("expires_on")) if entry else None

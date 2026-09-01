@@ -55,13 +55,6 @@ function mapSettings(raw) {
   };
 }
 
-/** The offsets that apply to a category, falling back to `default`. */
-export function offsetsFor(reminders, category) {
-  if (!reminders) return [];
-  if (Array.isArray(reminders[category])) return reminders[category];
-  return reminders.default || [];
-}
-
 /** `GET /api/settings/` */
 export async function getSettings() {
   return mapSettings(unwrap(await client.get('/settings/')));

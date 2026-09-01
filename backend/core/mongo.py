@@ -61,18 +61,6 @@ def get_db():
     return get_client()[settings.MONGODB_DATABASE]
 
 
-def close_client():
-    """Dispose of the cached client (used on shutdown and in tests)."""
-    global _client, _client_pid
-    if _client is not None:
-        try:
-            _client.close()
-        except Exception:  # pragma: no cover - best effort
-            pass
-    _client = None
-    _client_pid = None
-
-
 def items_collection():
     return get_db()[ITEMS]
 

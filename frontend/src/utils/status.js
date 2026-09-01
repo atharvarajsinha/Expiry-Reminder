@@ -72,14 +72,6 @@ export const STATUS_META = {
   },
 };
 
-const SEVERITY = {
-  [STATUS.UNKNOWN]: 0,
-  [STATUS.VALID]: 1,
-  [STATUS.EXPIRING_SOON]: 2,
-  [STATUS.EXPIRES_TODAY]: 3,
-  [STATUS.EXPIRED]: 4,
-};
-
 export function statusMeta(status) {
   return STATUS_META[status] || STATUS_META[STATUS.UNKNOWN];
 }
@@ -116,15 +108,6 @@ export function resolveExpiryStatus(expiry) {
     expiresOn,
     meta: statusMeta(status),
   };
-}
-
-/** The most urgent of several statuses - mirrors the backend's worst_status. */
-export function worstStatus(statuses) {
-  const known = statuses.filter(Boolean);
-  if (!known.length) return STATUS.UNKNOWN;
-  return known.reduce((worst, next) =>
-    (SEVERITY[next] ?? 0) > (SEVERITY[worst] ?? 0) ? next : worst,
-  );
 }
 
 /**
