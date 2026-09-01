@@ -94,21 +94,37 @@ The only thing this app persists locally is the theme preference and the
 
 ### CSRF (double-submit)
 
-Because cookies travel automatically, the backend also sets a *readable*
-`csrf_token` cookie whose value must be echoed in the `X-CSRF-Token` header on every
-unsafe request. `src/api/client.js` does that in a request interceptor:
+Because cookies travel automatically, the backend requires a CSRF value echoed in
+the `X-CSRF-Token` header on every unsafe request. `src/api/client.js` does that in
+a request interceptor:
 
 - `GET`/`HEAD`/`OPTIONS` → no header;
-- `POST`/`PUT`/`PATCH`/`DELETE` → `X-CSRF-Token: <csrf_token cookie>`.
+- `POST`/`PUT`/`PATCH`/`DELETE` → `X-CSRF-Token: <value>`.
 
-Reading that one cookie is intentional and safe: it is not a credential on its own,
-it only proves the request came from our own page. Django's CSRF protection is not
-disabled or worked around anywhere.
+**The value is held in memory, not read from the cookie.** The backend does also
+set a readable `csrf_token` cookie, and the original version of this client read
+it — which works locally, because `localhost:5173` and `localhost:8000` share a
+hostname and cookies ignore ports. It breaks the moment the app and the API are on
+different domains: the cookie is third-party, `document.cookie` cannot see it, and
+every write fails with `CSRF_FAILED` while reads keep working.
+
+So the value comes from the response body of `/auth/login/`, `/auth/refresh/` and
+`/auth/me/`. That last one matters: a reload loses the in-memory copy while the
+session cookies survive, so the startup check re-primes it. The cookie remains a
+fallback for same-host setups.
+
+Holding this one value in JavaScript is safe and is the point of the pattern — it
+is not a credential, it only proves the request came from our own page. The session
+tokens stay in HttpOnly cookies where JavaScript cannot reach them.
+
+A `403 CSRF_FAILED` is treated like a `401`: refresh once, retry once. That covers
+any residual desync without the user seeing anything.
 
 ### Session expiry
 
-A `401` triggers **one** shared `POST /auth/refresh/`; every request that hit the 401
-waits on that single in-flight refresh and is then retried once. If the refresh also
+A `401` — or a `403 CSRF_FAILED` — triggers **one** shared `POST /auth/refresh/`;
+every request that hit it waits on that single in-flight refresh and is then
+retried once. If the refresh also
 fails, the client notifies its `onUnauthorized` subscribers, `AuthContext` drops to
 the anonymous state and the router renders `/login`. The auth endpoints themselves
 are excluded from the retry, so there is no redirect loop and no `window.location`

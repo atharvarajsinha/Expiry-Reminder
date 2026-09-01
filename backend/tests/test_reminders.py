@@ -619,7 +619,11 @@ class TestReminderApi:
     ):
         # A monitor treats any non-2xx as the site being down. "It is not 9am
         # yet" must not page the user at three in the morning.
-        settings_override(CRON_TOKEN="test-cron-token", REMINDER_HOUR=23)
+        #
+        # The clock is pinned to 03:00: reading the real one would make this
+        # pass or fail depending on when the suite runs.
+        settings_override(CRON_TOKEN="test-cron-token")
+        monkeypatch.setattr(services, "local_now", lambda: at(3, day=today_local()))
         make_item([("insurance", today_local() + dt.timedelta(days=7))])
 
         response = api_client.get("/api/reminders/run/?token=test-cron-token")
@@ -627,6 +631,22 @@ class TestReminderApi:
         assert response.status_code == 200
         assert response.data["data"]["reason"] == "before_window"
         assert sent_emails == []
+
+    def test_a_ping_inside_the_window_runs_and_reports_what_it_sent(
+        self, api_client, sent_emails, settings_override, monkeypatch
+    ):
+        settings_override(CRON_TOKEN="test-cron-token")
+        monkeypatch.setattr(services, "local_now", lambda: at(9, day=today_local()))
+        make_item([("insurance", today_local() + dt.timedelta(days=7))])
+
+        first = api_client.get("/api/reminders/run/?token=test-cron-token")
+        second = api_client.get("/api/reminders/run/?token=test-cron-token")
+
+        assert first.data["data"]["reason"] == "ran"
+        assert first.data["data"]["sent"] == 1
+        # The monitor keeps pinging; the rest of the day is a cheap no-op.
+        assert second.data["data"]["reason"] == "already_ran"
+        assert len(sent_emails) == 1
 
     def test_cron_cannot_backdate_the_sweep(
         self, api_client, sent_emails, settings_override

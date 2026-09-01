@@ -400,6 +400,16 @@ def reminder_hour():
     return getattr(django_settings, "REMINDER_HOUR", 9)
 
 
+def local_now():
+    """Now, in the project timezone.
+
+    A named seam rather than an inline call so tests can pin the clock: the
+    scheduling gate is entirely about what hour it is, and a test that depends
+    on when the suite happens to run is a test that fails once a day.
+    """
+    return dt.datetime.now(tz=project_timezone())
+
+
 def claim_today(today):
     """Atomically win the right to run today's sweep.
 
@@ -437,7 +447,7 @@ def run_scheduled_sweep(now=None):
     * ``before_window`` -- it is earlier than ``REMINDER_HOUR`` today;
     * ``already_ran``   -- today's sweep is already done.
     """
-    now = now or dt.datetime.now(tz=project_timezone())
+    now = now or local_now()
     today = now.date()
     hour = reminder_hour()
 

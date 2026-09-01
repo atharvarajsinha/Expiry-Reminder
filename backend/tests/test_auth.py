@@ -97,6 +97,36 @@ class TestProtectedEndpoints:
         assert response.status_code == 200
         assert response.json()["data"]["username"] == settings.APP_USERNAME
 
+    def test_me_returns_the_csrf_value_so_a_reload_can_recover_it(self, api_client):
+        # The app keeps the CSRF value in memory and loses it on reload, while
+        # the session cookies survive. Without this field the first write after
+        # a refresh would fail with CSRF_FAILED.
+        issued = login(api_client).json()["data"]["csrf_token"]
+
+        response = api_client.get("/api/auth/me/")
+
+        assert response.status_code == 200
+        assert response.json()["data"]["csrf_token"] == issued
+
+    def test_me_answers_200_for_a_signed_out_visitor(self, api_client):
+        # "Am I signed in?" -> "no" is an answer, not a failure. A 401 here put
+        # a red error in the browser console on every visit to the login page.
+        response = api_client.get("/api/auth/me/")
+
+        assert response.status_code == 200
+        body = response.json()["data"]
+        assert body["authenticated"] is False
+        assert body["username"] is None
+        assert "csrf_token" not in body
+
+    def test_me_still_401s_for_a_broken_token(self, api_client):
+        # This one must stay a 401: it is what triggers refresh-and-retry.
+        api_client.credentials(HTTP_AUTHORIZATION="Bearer not-a-real-token")
+
+        response = api_client.get("/api/auth/me/")
+
+        assert response.status_code == 401
+
 
 class TestCsrf:
     def test_cookie_auth_without_csrf_header_is_blocked(self, api_client, vehicle_payload):
