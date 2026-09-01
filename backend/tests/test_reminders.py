@@ -236,6 +236,60 @@ class TestSweep:
         assert record["sent"] is True
         assert record["attempts"] == 2
 
+    def test_the_summary_says_why_it_failed(self, monkeypatch):
+        # "3 failed" with no reason is the difference between a user who can
+        # fix their Brevo config and one who cannot.
+        make_item([("insurance", TODAY + dt.timedelta(days=7))])
+
+        def refuse(item, entry, recipient):
+            raise EmailError(
+                "EMAIL_SEND_FAILED",
+                "The email service returned an error (HTTP 401).",
+                502,
+            )
+
+        monkeypatch.setattr(services, "send_reminder_email", refuse)
+
+        summary = services.run_sweep(today=TODAY)
+
+        assert summary["failed"] == 1
+        assert summary["failures"] == [
+            "The email service returned an error (HTTP 401)."
+        ]
+
+    def test_one_reason_is_reported_once_however_many_items_hit_it(
+        self, monkeypatch
+    ):
+        # A bad key fails every item identically; repeating it N times would
+        # bury the answer rather than give it.
+        for name in ("A", "B", "C"):
+            make_item(
+                [("valid_until", TODAY + dt.timedelta(days=7))],
+                category="document",
+                name=name,
+            )
+
+        monkeypatch.setattr(
+            services,
+            "send_reminder_email",
+            lambda item, entry, recipient: (_ for _ in ()).throw(
+                EmailError("EMAIL_NOT_CONFIGURED", "Email delivery is not configured.", 503)
+            ),
+        )
+
+        summary = services.run_sweep(today=TODAY)
+
+        assert summary["failed"] == 3
+        assert summary["failures"] == ["Email delivery is not configured."]
+
+    def test_a_clean_run_reports_no_failures(self, sent_emails):
+        make_item([("insurance", TODAY + dt.timedelta(days=7))])
+
+        summary = services.run_sweep(today=TODAY)
+
+        assert summary["sent"] == 1
+        assert summary["failures"] == []
+
     def test_one_failure_does_not_stop_the_others(self, monkeypatch):
         make_item([("insurance", TODAY + dt.timedelta(days=7))], identifier="UP25AK4922")
         make_item(

@@ -94,6 +94,8 @@ export async function runReminderCheck() {
     sent: data?.sent ?? 0,
     skipped: data?.skipped_already_sent ?? 0,
     failed: data?.failed ?? 0,
+    // Distinct reasons behind `failed`, so the toast can say why.
+    failures: Array.isArray(data?.failures) ? data.failures : [],
     error: data?.error ?? null,
   };
 }

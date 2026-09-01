@@ -52,5 +52,34 @@ export function sweepSummaryMessage(summary) {
   if (summary.failed) parts.push(`${summary.failed} failed`);
 
   if (!parts.length) return 'Nothing was due today.';
-  return `Reminder check finished: ${parts.join(', ')}.`;
+
+  const outcome = `Reminder check finished: ${parts.join(', ')}.`;
+  // "3 failed" on its own leaves the user guessing. The server sends the
+  // reasons, and they are written to be safe to show.
+  const reason = summary.failures?.[0];
+  return reason ? `${outcome} ${reason}` : outcome;
+}
+
+/**
+ * A next step for the failures we can recognise.
+ *
+ * The server deliberately reports Brevo's *status code* and nothing else - no
+ * response body, no key - which is safe but not actionable on its own. These
+ * are the two that actually happen, and what each one means in practice.
+ */
+export function deliveryHint(lastError) {
+  if (!lastError) return null;
+  if (lastError.includes('not configured')) {
+    return 'Set BREVO_API_KEY and BREVO_SENDER_EMAIL on the API service.';
+  }
+  if (lastError.includes('HTTP 401')) {
+    return 'Brevo rejected the key. Usually Security -> Authorised IPs is still switched on, which blocks the server.';
+  }
+  if (lastError.includes('HTTP 400')) {
+    return 'Brevo rejected the message. Usually the sender address is not verified under Brevo -> Senders.';
+  }
+  if (lastError.includes('could not be reached') || lastError.includes('respond in time')) {
+    return 'The API could not reach Brevo. This one is usually temporary.';
+  }
+  return null;
 }
