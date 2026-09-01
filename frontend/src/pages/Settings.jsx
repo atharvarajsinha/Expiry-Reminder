@@ -23,6 +23,14 @@ const PRESET_OFFSETS = [30, 7, 1, 0];
 /** The fallback row, shown first: it covers every category without its own. */
 const DEFAULT_KEY = 'default';
 
+/** `9` -> `9:00 am`. The send hour is a server setting, not a constant. */
+function formatHour(hour) {
+  if (hour === null || hour === undefined) return '9:00 am';
+  if (hour === 0) return '12:00 am';
+  if (hour === 12) return '12:00 pm';
+  return hour < 12 ? `${hour}:00 am` : `${hour - 12}:00 pm`;
+}
+
 function sortedDesc(values) {
   return [...new Set(values)].sort((a, b) => b - a);
 }
@@ -339,29 +347,35 @@ export default function Settings() {
 
         <SectionCard icon={Server} title="How reminders are sent">
           <p className="mb-4 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
-            There is no background worker. The daily check runs on the first
-            request the server handles each day, so opening this app is enough to
-            trigger it.
-            {delivery?.cronConfigured
-              ? ' An external scheduler is also configured, so reminders go out on days you never open the app.'
-              : ' On a day nobody opens the app, nothing is emailed until the next visit.'}
+            There is no background worker and nothing on the server runs on a
+            timer. An external pinger calls the API, and the first call at or
+            after {formatHour(delivery?.reminderHour)} each day checks every
+            date and emails whatever is due. Calling it more often is harmless
+            - it does the work once a day and nothing the rest of the time.
           </p>
+
+          {delivery && !delivery.cronConfigured ? (
+            <Alert variant="warning" className="mb-4">
+              The daily job is not set up, so nothing is emailed automatically.
+              Reminders only go out when you press &ldquo;Send Due Now&rdquo; on
+              the Reminders screen. See <code>script.txt</code> in the backend
+              for the setup.
+            </Alert>
+          ) : null}
 
           <DetailList
             items={[
               {
-                label: 'Last check ran',
-                value: delivery?.sweep?.lastRunAt
-                  ? formatDateTime(delivery.sweep.lastRunAt)
-                  : null,
+                label: 'Daily check',
+                value: delivery?.cronConfigured
+                  ? `${formatHour(delivery.reminderHour)}, every day`
+                  : 'Not scheduled',
               },
               {
-                label: 'On-request check',
-                value: delivery?.sweepOnRequest ? 'Enabled' : 'Disabled',
-              },
-              {
-                label: 'External scheduler',
-                value: delivery?.cronConfigured ? 'Configured' : 'Not configured',
+                // The one line that reveals a pinger which has stopped firing,
+                // so it says "Never" rather than the generic "Not set".
+                label: 'Last ran',
+                value: formatDateTime(delivery?.sweep?.lastRunAt, 'Never'),
               },
               {
                 label: 'Expiring soon window',

@@ -14,7 +14,7 @@ import requests
 
 from appsettings import services as settings_services
 from core import mongo
-from core.dates import to_storage, today_local
+from core.dates import project_timezone, to_storage, today_local
 from items import services as item_services
 from reminders import services
 from reminders.email_service import EmailError, build_subject, send_reminder_email
@@ -270,51 +270,122 @@ class TestSweep:
         assert sent_emails == []
 
 
-class TestDailyClaim:
-    """`maybe_run_sweep` is the whole scheduler; it must fire once a day."""
+def at(hour, day=None):
+    """A timezone-aware "now" in the project timezone, for the sweep gate."""
+    base = day or TODAY
+    return dt.datetime(base.year, base.month, base.day, hour, tzinfo=project_timezone())
 
-    def test_the_first_call_of_the_day_runs_and_the_rest_do_not(
-        self, sent_emails, settings_override
-    ):
-        settings_override(REMINDER_SWEEP_ON_REQUEST=True)
+
+class TestScheduledSweep:
+    """The gate that turns an interval pinger into a 9am daily job.
+
+    The realistic trigger is an uptime monitor hitting the endpoint every few
+    minutes, so "once a day, not before REMINDER_HOUR" has to hold here.
+    """
+
+    def test_nothing_happens_before_the_configured_hour(self, sent_emails):
         make_item([("insurance", TODAY + dt.timedelta(days=7))])
 
-        first = services.maybe_run_sweep(today=TODAY)
-        second = services.maybe_run_sweep(today=TODAY)
-        third = services.maybe_run_sweep(today=TODAY)
+        outcome = services.run_scheduled_sweep(now=at(8))
 
-        assert first is not None and first["sent"] == 1
-        assert second is None
-        assert third is None
+        assert outcome["ran"] is False
+        assert outcome["reason"] == "before_window"
+        assert outcome["runs_at_hour"] == 9
+        assert sent_emails == []
+        # Nothing was claimed, so the 9am run still happens.
+        assert services.sweep_state()["last_run_date"] is None
+
+    def test_it_runs_at_the_configured_hour(self, sent_emails):
+        make_item([("insurance", TODAY + dt.timedelta(days=7))])
+
+        outcome = services.run_scheduled_sweep(now=at(9))
+
+        assert outcome["ran"] is True
+        assert outcome["sent"] == 1
         assert len(sent_emails) == 1
+        assert services.sweep_state()["last_run_date"] == TODAY.isoformat()
 
-    def test_the_next_day_runs_again(self, sent_emails, settings_override):
-        settings_override(REMINDER_SWEEP_ON_REQUEST=True)
+    def test_a_pinger_hitting_it_all_day_sends_once(self, sent_emails):
+        make_item([("insurance", TODAY + dt.timedelta(days=7))])
+
+        # Every five minutes from 08:00 to 23:00, near enough.
+        outcomes = [services.run_scheduled_sweep(now=at(hour)) for hour in range(8, 24)]
+
+        assert sum(1 for o in outcomes if o["ran"]) == 1
+        assert len(sent_emails) == 1
+        assert outcomes[0]["reason"] == "before_window"   # 08:00
+        assert outcomes[1]["reason"] == "ran"             # 09:00
+        assert outcomes[2]["reason"] == "already_ran"     # 10:00
+
+    def test_the_next_day_runs_again(self, sent_emails):
         expiry = TODAY + dt.timedelta(days=7)
         make_item([("insurance", expiry)])
 
-        assert services.maybe_run_sweep(today=TODAY) is not None
-        assert services.maybe_run_sweep(today=TODAY) is None
-        # Six days later the "1 day before" reminder is due.
-        later = services.maybe_run_sweep(today=expiry - dt.timedelta(days=1))
-        assert later is not None and later["sent"] == 1
+        assert services.run_scheduled_sweep(now=at(9))["ran"] is True
+        assert services.run_scheduled_sweep(now=at(15))["ran"] is False
 
-    def test_it_can_be_turned_off(self, sent_emails, settings_override):
-        settings_override(REMINDER_SWEEP_ON_REQUEST=False)
+        # Six days on, the "1 day before" reminder falls due.
+        tomorrow = services.run_scheduled_sweep(
+            now=at(9, day=expiry - dt.timedelta(days=1))
+        )
+        assert tomorrow["ran"] is True
+        assert tomorrow["sent"] == 1
+
+    def test_the_hour_is_configurable(self, sent_emails, settings_override):
+        settings_override(REMINDER_HOUR=6)
         make_item([("insurance", TODAY + dt.timedelta(days=7))])
 
-        assert services.maybe_run_sweep(today=TODAY) is None
-        assert sent_emails == []
+        assert services.run_scheduled_sweep(now=at(5))["ran"] is False
+        assert services.run_scheduled_sweep(now=at(6))["ran"] is True
 
-    def test_the_last_run_is_reported(self, sent_emails, settings_override):
-        settings_override(REMINDER_SWEEP_ON_REQUEST=True)
+    def test_a_manual_run_does_not_consume_the_days_slot(self, sent_emails):
+        # Pressing "Send Due Now" at 08:00 must not cancel the 09:00 check --
+        # an item added in between would otherwise wait until tomorrow.
+        services.run_sweep(today=TODAY)
+
         assert services.sweep_state()["last_run_date"] is None
+        assert services.run_scheduled_sweep(now=at(9))["ran"] is True
 
-        services.maybe_run_sweep(today=TODAY)
+
+class TestSweepState:
+    """The cron job is the only scheduled caller, so "did it run?" matters."""
+
+    def test_a_scheduled_run_records_when_it_happened(self, sent_emails):
+        assert services.sweep_state() == {"last_run_date": None, "last_run_at": None}
+
+        services.run_scheduled_sweep(now=at(9))
 
         state = services.sweep_state()
         assert state["last_run_date"] == TODAY.isoformat()
         assert state["last_run_at"] is not None
+
+    def test_a_run_with_nothing_due_still_records(self, sent_emails):
+        # Otherwise a quiet week is indistinguishable from a pinger that has
+        # stopped firing, which is the failure this marker exists to surface.
+        make_item([("insurance", TODAY + dt.timedelta(days=200))])
+
+        outcome = services.run_scheduled_sweep(now=at(9))
+
+        assert outcome["sent"] == 0
+        assert services.sweep_state()["last_run_date"] == TODAY.isoformat()
+
+    def test_the_marker_moves_forward_on_the_next_run(self, sent_emails):
+        services.run_scheduled_sweep(now=at(9))
+        services.run_scheduled_sweep(now=at(9, day=TODAY + dt.timedelta(days=1)))
+
+        assert services.sweep_state()["last_run_date"] == (
+            TODAY + dt.timedelta(days=1)
+        ).isoformat()
+
+    def test_running_the_sweep_twice_still_sends_once(self, sent_emails):
+        # The unique reminder index is what prevents duplicate mail -- not the
+        # marker -- so two overlapping runs are harmless.
+        make_item([("insurance", TODAY + dt.timedelta(days=7))])
+
+        services.run_sweep(today=TODAY)
+        services.run_sweep(today=TODAY)
+
+        assert len(sent_emails) == 1
 
 
 class TestEmailComposition:
@@ -482,9 +553,12 @@ class TestReminderApi:
         )
 
         assert response.status_code == 200
-        assert response.data["data"]["triggered_by"] == "cron"
-        assert response.data["data"]["sent"] == 1
-        assert len(sent_emails) == 1
+        data = response.data["data"]
+        assert data["triggered_by"] == "cron"
+        # Gated: whether it actually swept depends on the hour the suite runs
+        # at, which is exactly the behaviour under test.
+        assert data["reason"] in ("ran", "before_window", "already_ran")
+        assert data["runs_at_hour"] == 9
 
     def test_a_wrong_cron_token_is_rejected(
         self, api_client, sent_emails, settings_override
@@ -508,6 +582,52 @@ class TestReminderApi:
         )
         assert response.status_code == 401
 
+    def test_a_get_request_is_accepted_with_a_token(
+        self, api_client, settings_override
+    ):
+        # Uptime monitors default to GET and often cannot be switched to POST.
+        settings_override(CRON_TOKEN="test-cron-token")
+
+        response = api_client.get(
+            "/api/reminders/run/", HTTP_X_CRON_TOKEN="test-cron-token"
+        )
+
+        assert response.status_code == 200
+        assert response.data["data"]["triggered_by"] == "cron"
+
+    def test_a_get_request_without_a_token_is_rejected(self, api_client):
+        assert api_client.get("/api/reminders/run/").status_code == 401
+
+    def test_the_token_may_travel_as_a_query_parameter(
+        self, api_client, settings_override
+    ):
+        # UptimeRobot's free plan cannot attach custom headers, so the query
+        # form has to work or the daily check never fires.
+        settings_override(CRON_TOKEN="test-cron-token")
+
+        response = api_client.get("/api/reminders/run/?token=test-cron-token")
+
+        assert response.status_code == 200
+        assert response.data["data"]["triggered_by"] == "cron"
+
+    def test_a_wrong_query_token_is_rejected(self, api_client, settings_override):
+        settings_override(CRON_TOKEN="test-cron-token")
+        assert api_client.get("/api/reminders/run/?token=guess").status_code == 401
+
+    def test_an_early_ping_is_a_200_not_an_error(
+        self, api_client, sent_emails, settings_override, monkeypatch
+    ):
+        # A monitor treats any non-2xx as the site being down. "It is not 9am
+        # yet" must not page the user at three in the morning.
+        settings_override(CRON_TOKEN="test-cron-token", REMINDER_HOUR=23)
+        make_item([("insurance", today_local() + dt.timedelta(days=7))])
+
+        response = api_client.get("/api/reminders/run/?token=test-cron-token")
+
+        assert response.status_code == 200
+        assert response.data["data"]["reason"] == "before_window"
+        assert sent_emails == []
+
     def test_cron_cannot_backdate_the_sweep(
         self, api_client, sent_emails, settings_override
     ):
@@ -525,8 +645,8 @@ class TestReminderApi:
         )
 
         assert response.status_code == 200
-        # `for_date` was ignored: it swept the real today, where that long
-        # expired date is due for nothing.
+        # `for_date` was ignored: the scheduled path always uses the real
+        # today, where that long expired date is due for nothing.
         assert sent_emails == []
 
 

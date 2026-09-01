@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import datetime as dt
 
-import pytest
-
 from core.dates import today_local
 
 

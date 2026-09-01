@@ -230,8 +230,9 @@ Two different sources, kept deliberately apart:
 behind a confirmation dialog. It is idempotent — an already-sent reminder is not sent
 again — and the toast reports the returned summary.
 
-When the server has no mail credentials the page says so plainly, because the
-schedule still being accurate is not the same as reminders arriving.
+When the server has no mail credentials, or no daily trigger is configured, the
+page says so plainly — the schedule still being accurate is not the same as
+reminders arriving.
 
 ---
 

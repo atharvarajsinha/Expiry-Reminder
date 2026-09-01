@@ -8,9 +8,9 @@ and only application database, so ``DATABASES`` is empty, there are no
 migrations and ``django.contrib.auth`` / ``sessions`` / ``admin`` are not
 installed.
 
-There is also no broker, no worker and no scheduler.  A single web process is
-the entire backend; the daily reminder sweep rides on the first request of the
-day (see ``core.middleware.ReminderSweepMiddleware``).
+There is also no broker, no worker and no in-process scheduler.  A single web
+process is the entire backend; reminder email is sent when an external pinger
+hits ``/api/reminders/run/`` (see ``CRON_TOKEN`` and ``REMINDER_HOUR``).
 """
 
 from __future__ import annotations
@@ -110,8 +110,6 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "core.middleware.SecurityHeadersMiddleware",
     "core.middleware.RequestLogMiddleware",
-    # Last, so the sweep runs after the response has been built.
-    "core.middleware.ReminderSweepMiddleware",
 ]
 
 TEMPLATES = [
@@ -208,14 +206,24 @@ REMINDER_OFFSET_OVERRIDES = {
     )
 }
 
-# The scheduler, such as it is: the first API request of each calendar day
-# runs the sweep. Turn it off if an external cron is the only trigger you
-# want (see CRON_TOKEN).
-REMINDER_SWEEP_ON_REQUEST = env_bool("REMINDER_SWEEP_ON_REQUEST", True)
+# The local hour at or after which the daily check may run. The trigger is an
+# external pinger, and an uptime monitor pings on an interval rather than at a
+# time -- so the endpoint itself enforces "once a day, not before this hour".
+# Without it the first ping after midnight would send the day's reminders at
+# 00:05.
+REMINDER_HOUR = env_int("REMINDER_HOUR", 9)
 
-# Shared secret for POST /api/reminders/run/ so an external scheduler can send
-# reminders on days nobody opens the app. Unset means that route is
-# signed-in-users only.
+# Shared secret for /api/reminders/run/. This is how reminder email gets sent:
+# a scheduler or uptime monitor presents this token, and the first call at or
+# after REMINDER_HOUR each day runs the check.
+#
+# It may travel either as the `X-Cron-Token` header (preferred) or as a
+# `?token=` query parameter, because some free monitors -- UptimeRobot among
+# them -- cannot send custom headers. The query form puts the secret in the
+# web server's access log, so use the header wherever the tool allows it.
+#
+# Leave unset and the route is restricted to signed-in users, which means email
+# only goes out when somebody presses "Send Due Now" by hand.
 CRON_TOKEN = env("CRON_TOKEN")
 
 

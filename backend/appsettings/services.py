@@ -102,14 +102,3 @@ def update_settings(payload):
 
     logger.info("Reminder settings updated")
     return get_settings()
-
-
-def reminder_offsets(category):
-    reminders = get_settings()["reminders"]
-    if category in reminders:
-        return reminders[category]
-    return reminders.get(DEFAULT_OFFSET_KEY, [])
-
-
-def reminder_recipient():
-    return get_settings().get("reminder_email")

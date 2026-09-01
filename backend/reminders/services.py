@@ -1,6 +1,6 @@
 """Reminder engine.
 
-There is no worker and no scheduler.  Reminders exist in two forms:
+There is no worker and no in-process scheduler.  Reminders exist in two forms:
 
 **Derived.**  "What is due, and what is coming" is computed from the items and
 the configured offsets every time it is asked for (:func:`due_reminders`,
@@ -10,16 +10,24 @@ the answer is never stale and there is nothing to keep in sync.
 **Recorded.**  A row is written only when an email is actually claimed for
 sending.  The claim goes through a unique compound index
 (``item_id + expiry_key + expiry_date + reminder_type``) *before* the message
-leaves, so the sweep is safe to run twice, from two web workers, or from a cron
-ping and a page load at the same moment -- the second one finds the row taken
-and sends nothing.
+leaves, so :func:`run_sweep` is safe to run twice, from two web workers, or
+from a cron ping and a button press at the same moment -- the second one finds
+the row taken and sends nothing.
 
-The sweep is driven by :func:`maybe_run_sweep` (called once per day by the
-request middleware) or by an explicit ``POST /api/reminders/run/``.
+:func:`run_sweep` is triggered from outside: something hits
+``/api/reminders/run/``.  Nothing in this process runs it on a timer.
+
+That trigger is usually an uptime monitor rather than a real cron daemon,
+because free schedulers are scarce and free uptime monitors are not.  A monitor
+pings on an *interval* -- UptimeRobot's floor is five minutes -- so the "once a
+day, at nine in the morning" part cannot live in the caller.  It lives in
+:func:`run_scheduled_sweep`, which is cheap to call as often as you like and
+does real work at most once per calendar day.
 """
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 
 from django.conf import settings as django_settings
@@ -33,6 +41,7 @@ from core.dates import (
     iso_date,
     iso_datetime,
     now_utc,
+    project_timezone,
     reminder_type_for_offset,
     scheduled_for,
     to_storage,
@@ -370,30 +379,6 @@ def run_sweep(today=None):
     return summary
 
 
-def claim_today(today):
-    """Atomically win the right to run today's sweep.
-
-    ``find_one_and_update`` with ``last_run_date`` in the filter means exactly
-    one caller can move the marker forward per calendar day; every other
-    request that day matches nothing and does no work.  Losing the race is the
-    normal case and is not an error.
-    """
-    stamp = to_storage(today)
-    try:
-        result = mongo.settings_collection().find_one_and_update(
-            {"_id": SWEEP_STATE_ID, "last_run_date": {"$ne": stamp}},
-            {"$set": {"last_run_date": stamp, "last_run_at": now_utc()}},
-            upsert=True,
-        )
-    except DuplicateKeyError:
-        # Two callers raced on the upsert; the other one won.
-        return False
-    except PyMongoError as exc:
-        raise mongo.database_error(exc)
-    # `result` is the pre-update document: None means we created the marker.
-    return True if result is None else result.get("last_run_date") != stamp
-
-
 def sweep_state():
     """When the sweep last ran, for the settings screen and the health check."""
     try:
@@ -408,19 +393,82 @@ def sweep_state():
     }
 
 
-def maybe_run_sweep(today=None):
-    """Run today's sweep if nobody has yet.  Returns the summary, or ``None``.
+# ---------------------------------------------------------------------------
+# The scheduling gate
+# ---------------------------------------------------------------------------
+def reminder_hour():
+    return getattr(django_settings, "REMINDER_HOUR", 9)
 
-    This is the whole scheduler.  It is called from the request middleware, so
-    the first request of the day pays for the sweep and every later one costs a
-    single indexed lookup that matches nothing.
+
+def claim_today(today):
+    """Atomically win the right to run today's sweep.
+
+    ``find_one_and_update`` with ``last_run_date`` in the filter means exactly
+    one caller can move the marker forward per calendar day.  Every other ping
+    that day matches nothing and does no work, which is what makes a monitor
+    hitting this every five minutes harmless.
+
+    Losing the race is the normal case, not an error.
     """
-    if not getattr(django_settings, "REMINDER_SWEEP_ON_REQUEST", True):
-        return None
+    stamp = to_storage(today)
+    try:
+        result = mongo.settings_collection().find_one_and_update(
+            {"_id": SWEEP_STATE_ID, "last_run_date": {"$ne": stamp}},
+            {"$set": {"last_run_date": stamp, "last_run_at": now_utc()}},
+            upsert=True,
+        )
+    except DuplicateKeyError:
+        # Two pings raced on the upsert; the other one won.
+        return False
+    except PyMongoError as exc:
+        raise mongo.database_error(exc)
+    # `result` is the pre-update document: None means we created the marker.
+    return True if result is None else result.get("last_run_date") != stamp
 
-    today = today or today_local()
+
+def run_scheduled_sweep(now=None):
+    """The externally triggered daily check.
+
+    Answers one of three ways, and never raises for an ordinary "nothing to do
+    yet" -- the caller is usually an uptime monitor that treats any non-2xx as
+    the site being down:
+
+    * ``ran``           -- the sweep happened, with its summary;
+    * ``before_window`` -- it is earlier than ``REMINDER_HOUR`` today;
+    * ``already_ran``   -- today's sweep is already done.
+    """
+    now = now or dt.datetime.now(tz=project_timezone())
+    today = now.date()
+    hour = reminder_hour()
+
+    if now.hour < hour:
+        return {
+            "ran": False,
+            "reason": "before_window",
+            "date": today.isoformat(),
+            "runs_at_hour": hour,
+        }
+
     if not claim_today(today):
-        return None
+        return {
+            "ran": False,
+            "reason": "already_ran",
+            "date": today.isoformat(),
+            "runs_at_hour": hour,
+        }
 
-    logger.info("Running the daily reminder sweep for %s", today.isoformat())
-    return run_sweep(today=today)
+    logger.info("Running the daily reminder check for %s", today.isoformat())
+    summary = run_sweep(today=today)
+
+    # `claim_today` already stamped the marker so no concurrent ping could
+    # start a second sweep; move `last_run_at` to the finish time now that we
+    # know how long it took. Best effort -- the mail is already sent, and
+    # failing here must not turn a successful run into an error.
+    try:
+        mongo.settings_collection().update_one(
+            {"_id": SWEEP_STATE_ID}, {"$set": {"last_run_at": now_utc()}}
+        )
+    except PyMongoError as exc:  # pragma: no cover - defensive
+        logger.error("Could not stamp the sweep finish: %s", exc.__class__.__name__)
+
+    return {"ran": True, "reason": "ran", "runs_at_hour": hour, **summary}

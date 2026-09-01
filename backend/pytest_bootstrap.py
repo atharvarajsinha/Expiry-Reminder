@@ -24,9 +24,6 @@ TEST_ENV = {
     "REMINDER_EMAIL": "owner@example.com",
     "REMINDER_OFFSETS": "30,7,1,0",
     "CRON_TOKEN": "test-cron-token",
-    # The sweep is triggered explicitly in the tests that care about it; a
-    # middleware firing on every request would hide which call did what.
-    "REMINDER_SWEEP_ON_REQUEST": "False",
     "AUTH_COOKIE_SECURE": "False",
     "AUTH_COOKIE_SAMESITE": "Lax",
     "TIME_ZONE": "Asia/Kolkata",

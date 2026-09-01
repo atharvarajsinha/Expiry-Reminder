@@ -2,21 +2,50 @@
  HOSTING THE BACKEND ON RENDER
 ===============================================================================
 
-You create 2 things on Render:
+The backend is ONE web service. There is no Redis, no Background Worker and no
+Celery Beat.
 
-   1. Web Service      - the API (this is the whole backend)
-   2. Cron Job         - optional; triggers the daily reminder sweep
+Nothing inside the app runs on a timer. Reminder email is sent when something
+OUTSIDE calls one URL. That something is an UptimeRobot monitor -- step 7.
 
-There is NO Redis, NO Background Worker and NO Celery Beat. The API runs the
-daily reminder check itself on the first request it handles each day, so the
-web service alone is a working deployment.
 
-The Cron Job in step 3 is what makes reminders arrive on days you never open
-the app. Skip it if you are happy for email to depend on the app being visited.
+-------------------------------------------------------------------------------
+ WHY THE ORDER BELOW MATTERS
+-------------------------------------------------------------------------------
+
+Do these in order. Each step produces a value the next one needs:
+
+   STEP 1  GitHub            -> a repo Render can build from
+   STEP 2  MongoDB Atlas     -> MONGODB_URI
+   STEP 3  Brevo (optional)  -> BREVO_API_KEY, BREVO_SENDER_EMAIL
+   STEP 4  Generate secrets  -> SECRET_KEY, JWT_SECRET_KEY, CRON_TOKEN
+                               |
+                               v
+   STEP 5  Render Web Service - needs everything above AT CREATION TIME
+                               |
+                               v
+   STEP 6  Verify it is up   -> your API URL
+                               |
+                               +--> STEP 7  UptimeRobot (needs the API URL)
+                               +--> STEP 8  Frontend    (needs the API URL)
+                                            |
+                                            v
+   STEP 9  Come back and set FRONTEND_URL + CORS_ALLOWED_ORIGINS
+
+Steps 2, 3 and 4 first because their values are environment variables you type
+into the web service form in step 5. Creating the service before you have them
+means a failed first deploy and a second trip through the settings page.
+
+Step 7 last because the monitor's URL contains the API address, which does not
+exist until step 5 has deployed.
+
+Step 9 exists because backend and frontend each need the other's URL. There is
+no way to know both up front: deploy the backend, deploy the frontend against
+it, then come back and tell the backend where the frontend ended up.
 
 
 ===============================================================================
- STEP 0 - PUSH THE CODE TO GITHUB
+ STEP 1 - PUSH THE CODE TO GITHUB
 ===============================================================================
 
    cd D:\remind-vahan
@@ -31,11 +60,78 @@ Check that .env was NOT uploaded:
 
    git ls-files | findstr /I ".env"
 
-Only  backend/.env.example  should appear.
+Only  backend/.env.example  should appear. If backend/.env is listed, remove it
+before going further:
+
+   git rm --cached backend/.env
+   git commit -m "Remove .env"
+   git push
 
 
 ===============================================================================
- STEP 1 - WEB SERVICE
+ STEP 2 - MONGODB ATLAS
+===============================================================================
+
+Do this before creating the web service: it produces MONGODB_URI.
+
+   1. Atlas -> Create a free M0 cluster
+   2. Database Access -> Add New Database User
+        Give it a password with NO special characters, or URL-encode them
+        later (@ becomes %40, # becomes %23, and so on)
+   3. Network Access -> Add IP Address -> 0.0.0.0/0
+        Render's outbound IP is not fixed on the free and starter plans, so an
+        IP allowlist cannot work. Without this, /api/health/ returns 503.
+   4. Database -> Connect -> Drivers -> copy the connection string
+
+You now have:
+
+   MONGODB_URI   mongodb+srv://USER:PASS@cluster0.xxxx.mongodb.net/?retryWrites=true&w=majority
+
+Do NOT put the database name in the path. It goes in MONGODB_DATABASE.
+
+
+===============================================================================
+ STEP 3 - BREVO  (optional -- skip if you do not want email)
+===============================================================================
+
+Also before the web service: it produces two environment variables.
+
+   1. Brevo -> SMTP & API -> API Keys -> Generate a new key
+   2. Brevo -> Senders -> add your sender address and VERIFY it
+        An unverified sender makes every reminder fail with HTTP 400
+   3. Brevo -> Security -> Authorised IPs -> turn the restriction OFF
+        Render's outbound IP is not on your allowlist, so leaving this ON
+        makes every reminder fail with HTTP 401
+
+You now have:
+
+   BREVO_API_KEY       xkeysib-...
+   BREVO_SENDER_EMAIL  <the verified address>
+
+Leaving all of this out is a valid deployment. The app still tracks everything
+and shows you what is expiring; it just cannot email you. The Reminders screen
+says so plainly rather than pretending mail is going out.
+
+
+===============================================================================
+ STEP 4 - GENERATE THE SECRETS
+===============================================================================
+
+Three values you invent rather than copy from a service. On Render you can
+click "Generate" for each, or make them locally:
+
+   python -c "import secrets; print(secrets.token_urlsafe(50))"
+
+   SECRET_KEY       Django's signing key
+   JWT_SECRET_KEY   signs your login tokens
+   CRON_TOKEN       the secret UptimeRobot puts in its URL
+
+Keep CRON_TOKEN somewhere you can find it again -- step 7 pastes it into a URL.
+Make it long and URL-safe (the command above produces exactly that).
+
+
+===============================================================================
+ STEP 5 - CREATE THE RENDER WEB SERVICE
 ===============================================================================
 
    New +  ->  Web Service  ->  pick your repo
@@ -43,126 +139,233 @@ Only  backend/.env.example  should appear.
    Name              :  expiry-reminder-api
    Language          :  Python 3
    Branch            :  main
-   Root Directory    :  backend
-   Region            :  Singapore
+   Root Directory    :  backend           <-- easy to miss, and nothing works
+                                              without it
+   Region            :  Singapore         (pick the one nearest your Atlas
+                                           cluster; cross-region adds latency
+                                           to every request)
 
    Build Command:
    pip install -r requirements.txt
 
    Start Command:
-   gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 3 --timeout 120 --access-logfile - --error-logfile -
+   gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 3 --timeout 120 --access-logfile - --access-logformat '%(h)s %(l)s %(u)s %(t)s "%(m)s %(U)s %(H)s" %(s)s %(b)s' --error-logfile -
 
-   Health Check Path :  /api/health/
+   The --access-logformat is not decoration. It is the stock format with the
+   query string dropped, so the token in step 7's URL is not written into the
+   log line of every request.
 
-Add the environment variables from step 2, then Deploy.
+   Health Check Path :  /api/health/      (with the trailing slash)
 
-
-===============================================================================
- STEP 2 - ENVIRONMENT VARIABLES
-===============================================================================
-
-Set these on the web service. If you add the cron job in step 3, the easiest
-route is Env Groups -> New Environment Group -> add every line below -> attach
-the group to both services.
+Now add the environment variables, using the values from steps 2, 3 and 4:
 
    DEBUG                 False
-   SECRET_KEY            <click Generate>
-   JWT_SECRET_KEY        <click Generate>
-   CRON_TOKEN            <click Generate>   (only needed for step 3)
-   APP_USERNAME          <your login username>
-   APP_PASSWORD          <your login password>
-   MONGODB_URI           mongodb+srv://USER:PASS@cluster0.xxxx.mongodb.net/?retryWrites=true&w=majority
+   SECRET_KEY            <from step 4>
+   JWT_SECRET_KEY        <from step 4>
+   CRON_TOKEN            <from step 4>
+   REMINDER_HOUR         9
+   APP_USERNAME          <the username you will log in with>
+   APP_PASSWORD          <the password you will log in with>
+   MONGODB_URI           <from step 2>
    MONGODB_DATABASE      expiry_reminder
-   BREVO_API_KEY         <your Brevo key>
-   BREVO_SENDER_EMAIL    <verified sender in Brevo>
-   REMINDER_EMAIL        <where reminders are delivered>
-   FRONTEND_URL          https://<your-frontend>.vercel.app
-   CORS_ALLOWED_ORIGINS  https://<your-frontend>.vercel.app
+   BREVO_API_KEY         <from step 3, or leave unset>
+   BREVO_SENDER_EMAIL    <from step 3, or leave unset>
+   REMINDER_EMAIL        <where reminders should be delivered>
    TIME_ZONE             Asia/Kolkata
    AUTH_COOKIE_SECURE    True
    AUTH_COOKIE_SAMESITE  None
    PYTHON_VERSION        3.12.7
 
-AUTH_COOKIE_SECURE and AUTH_COOKIE_SAMESITE are required. Without them the
-browser drops the login cookie and every request after login returns 401.
+   FRONTEND_URL          http://localhost:5173     <-- placeholder, fixed in
+   CORS_ALLOWED_ORIGINS  http://localhost:5173         step 9
 
-FRONTEND_URL is printed inside every reminder email. Do not leave it as
-localhost.
+Three of these are load-bearing and easy to get wrong:
 
-TIME_ZONE decides which calendar day "7 days before" lands on. Get it wrong and
-reminders arrive a day early or late.
+   AUTH_COOKIE_SECURE=True and AUTH_COOKIE_SAMESITE=None
+       Required whenever the frontend is on a different domain to the API.
+       Without them the browser silently drops the login cookie and every
+       request after a successful login returns 401.
 
+   TIME_ZONE
+       Decides which calendar day "7 days before" lands on, AND which clock
+       REMINDER_HOUR is read against. Wrong value means reminders arrive a day
+       early or late, forever.
 
-===============================================================================
- STEP 3 - CRON JOB (optional but recommended)
-===============================================================================
+   REMINDER_HOUR
+       The local hour the daily check is allowed to run at. 9 means "at or
+       after 09:00 Asia/Kolkata". This is what makes an every-five-minutes
+       monitor behave like a nine-in-the-morning job.
 
-Without this, the daily check runs only when someone opens the app. With it,
-reminders go out whether or not anyone visits.
+   REMINDER_EMAIL
+       Where reminders go. You can change it later in the app's Settings
+       screen; this is only the default.
 
-   New +  ->  Cron Job  ->  same repo
-
-   Name              :  expiry-reminder-sweep
-   Root Directory    :  backend
-   Schedule          :  30 3 * * *
-
-   Build Command:
-   pip install -r requirements.txt
-
-   Command:
-   curl -fsS -X POST -H "X-Cron-Token: $CRON_TOKEN" https://<your-api>.onrender.com/api/reminders/run/
-
-Render cron schedules are in UTC.  30 3 * * *  =  09:00 India time.
-
-The cron job needs only CRON_TOKEN, and it must be the SAME value as the web
-service. It calls the API over HTTP, so it needs nothing else.
-
-The sweep is idempotent: a reminder already sent today is not sent again. The
-cron ping and someone opening the app on the same morning still produce exactly
-one email.
+Deploy.
 
 
 ===============================================================================
- STEP 4 - MONGODB ATLAS
+ STEP 6 - VERIFY THE API BEFORE BUILDING ON TOP OF IT
 ===============================================================================
 
-   Atlas -> Network Access -> Add IP Address -> 0.0.0.0/0
+   curl https://<your-service>.onrender.com/api/health/
 
-Without this, Render cannot reach your database and /api/health/ fails.
-URL-encode any special characters in the database password.
+Expect HTTP 200 and:
 
+   {"status":"healthy","database":"connected", ...}
 
-===============================================================================
- STEP 5 - BREVO
-===============================================================================
+If the database says "disconnected", stop here and fix step 2 -- everything
+after this depends on it.
 
-   Brevo -> Security -> Authorised IPs -> turn the restriction OFF
+Write down your API URL. Steps 7, 8 and 9 all need it.
 
-Render's outbound IP is not on your allowlist, so leaving this ON makes every
-reminder email fail with HTTP 401.
+Optionally load some sample data so the screens have something in them. Run
+this locally, with the same MONGODB_URI in your local .env:
 
-Also confirm BREVO_SENDER_EMAIL appears under Brevo -> Senders as verified.
-
-Leaving the Brevo variables unset is a valid deployment: the app still tracks
-everything and shows what is expiring, it just cannot email you.
+   python manage.py seed_items
 
 
 ===============================================================================
- STEP 6 - CHECK IT WORKS
+ STEP 7 - UPTIMEROBOT  (this is what sends the email)
 ===============================================================================
 
-   curl https://<service>.onrender.com/api/health/
+Only possible now: the URL below contains the API address from step 6.
 
-Expect HTTP 200 with the database reported as connected.
+WHAT YOU ARE SETTING UP, AND WHY IT LOOKS ODD
+---------------------------------------------
+UptimeRobot is an uptime monitor, not a scheduler. It pings a URL on an
+INTERVAL -- every 5 minutes on the free plan -- and it cannot be told "run at
+09:00". It also cannot send custom HTTP headers on the free plan, and it sends
+GET, not POST.
 
-   curl "https://<service>.onrender.com/api/health/?sweep=1"
+So the API takes care of the scheduling itself. The endpoint is:
 
-Adds when the daily reminder sweep last ran.
+  - cheap to call as often as you like,
+  - does the real work at most ONCE per calendar day,
+  - and not before REMINDER_HOUR (09:00).
 
-Cron job: click "Trigger Run". The log prints a summary like
+You are not scheduling anything here. You are giving the app a heartbeat and
+letting it decide when to act.
 
-   {"success": true, "data": {"triggered_by": "cron", "due": 5, "sent": 5,
-    "skipped_already_sent": 0, "failed": 0}}
+SET IT UP
+---------
+   UptimeRobot -> + New monitor
+
+   Monitor Type      :  HTTP(s)
+   Friendly Name     :  Expiry reminders daily check
+   URL               :  https://<your-api>.onrender.com/api/reminders/run/?token=<CRON_TOKEN>
+   Monitoring Interval: 5 minutes  (or anything; it makes no difference)
+
+   Save.
+
+Paste the CRON_TOKEN value from step 4 where <CRON_TOKEN> is. The token is in
+the URL because the free plan has no custom-headers field -- see the note at
+the bottom of this step.
+
+CHECK IT
+--------
+Paste the same URL into a browser. You get HTTP 200 and one of:
+
+   {"reason": "before_window"}   it is earlier than 09:00 today
+   {"reason": "ran", ...}        it just did today's check
+   {"reason": "already_ran"}     today's check is already done
+
+All three are 200 on purpose. If "not yet 9am" returned an error, UptimeRobot
+would decide your site was down and email you about it at 3am every night.
+
+In UptimeRobot the monitor should sit at "Up". If it flaps to "Down", open the
+URL by hand and read the response -- a 401 means the token in the URL does not
+match CRON_TOKEN on the web service.
+
+A NOTE ON THE TOKEN BEING IN THE URL
+------------------------------------
+Anything in a query string tends to end up in web server logs. This app strips
+query strings out of its gunicorn access log for exactly that reason, so the
+token is not written on every request.
+
+If your monitor CAN send custom headers (UptimeRobot's paid plans can, and so
+can Better Stack and Cron-Job.org on their free tiers), prefer that instead and
+leave the token out of the URL entirely:
+
+   URL     :  https://<your-api>.onrender.com/api/reminders/run/
+   Header  :  X-Cron-Token: <CRON_TOKEN>
+
+Both forms work. If the token ever leaks, change CRON_TOKEN on the web service
+and update the monitor -- the worst anyone can do with it is trigger a check
+that was going to happen anyway.
+
+A FREE-PLAN BONUS
+-----------------
+Render's free web services sleep after 15 minutes idle and take ~30 seconds to
+wake. A monitor pinging every 5 minutes keeps the service warm, so the app is
+fast when you open it. That is a side effect, not the reason -- but it is a
+real one.
+
+
+===============================================================================
+ STEP 8 - DEPLOY THE FRONTEND
+===============================================================================
+
+Vercel, Netlify or Render Static Site. Root directory  frontend  , and one
+environment variable pointing at step 6's URL:
+
+   VITE_API_BASE_URL   https://<your-api>.onrender.com/api
+
+Note the /api suffix and no trailing slash.
+
+Full instructions are in  frontend/README.md .
+
+
+===============================================================================
+ STEP 9 - POINT THE BACKEND AT THE FRONTEND
+===============================================================================
+
+Go back to the web service from step 5 and replace the two placeholders with
+the URL the frontend actually got:
+
+   FRONTEND_URL          https://<your-frontend>.vercel.app
+   CORS_ALLOWED_ORIGINS  https://<your-frontend>.vercel.app
+
+Save. Render redeploys automatically.
+
+   CORS_ALLOWED_ORIGINS must match the browser's address bar EXACTLY:
+   https://, no trailing slash, no path. A mismatch shows up as a CORS error
+   in the browser console and nothing else.
+
+   FRONTEND_URL is printed inside every reminder email as the "open the app"
+   link. Leave it as localhost and every email you send yourself has a dead
+   button in it.
+
+
+===============================================================================
+ STEP 10 - CHECK THE WHOLE THING WORKS
+===============================================================================
+
+   1. Open the frontend and log in with APP_USERNAME / APP_PASSWORD
+
+   2. Add an item with a date a few days out
+
+   3. Reminders screen -> the schedule should list send dates for it
+
+   4. Reminders screen -> "Send Due Now"
+        Nothing due today is a correct result, not a failure
+
+   5. When the daily check last ran:
+        curl "https://<your-api>.onrender.com/api/health/?sweep=1"
+
+        Or read it in the app: Settings -> How reminders are sent -> Last ran.
+        That line is the one to glance at occasionally. If it stops moving,
+        the monitor has stopped firing.
+
+   6. The monitor URL, in a browser:
+
+        {"success": true, "data": {"triggered_by": "cron",
+         "reason": "before_window", "runs_at_hour": 9}}
+
+        before_window / ran / already_ran are all correct answers depending
+        on the time of day. All of them are HTTP 200.
+
+   7. Tomorrow morning, after 09:00: check your inbox, and check that
+      "Last ran" shows today.
 
 
 ===============================================================================
@@ -175,9 +378,9 @@ Cron job: click "Trigger Run". The log prints a summary like
  2. NEVER run  python manage.py collectstatic
     There is no admin and no whitenoise. It is not needed.
 
- 3. Do NOT try to add a worker or a scheduler process.
-    There is no Celery app to run. The daily check lives inside the web
-    service (see backend/README.md section 4).
+ 3. Do NOT add a worker or a scheduler process.
+    There is no Celery app to run, and nothing to schedule -- the app decides
+    when to act, the monitor just provides the heartbeat (README section 4).
 
 
 ===============================================================================
@@ -185,16 +388,16 @@ Cron job: click "Trigger Run". The log prints a summary like
 ===============================================================================
 
    Root Directory   backend
-   Build (both)     pip install -r requirements.txt
-   Web start        gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 3 --timeout 120 --access-logfile - --error-logfile -
-   Cron command     curl -fsS -X POST -H "X-Cron-Token: $CRON_TOKEN" https://<your-api>.onrender.com/api/reminders/run/
-   Cron schedule    30 3 * * *
+   Build            pip install -r requirements.txt
+   Web start        gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 3 --timeout 120 --access-logfile - --access-logformat '%(h)s %(l)s %(u)s %(t)s "%(m)s %(U)s %(H)s" %(s)s %(b)s' --error-logfile -
    Health check     /api/health/
+   Monitor URL      https://<your-api>.onrender.com/api/reminders/run/?token=<CRON_TOKEN>
+   Monitor interval anything (5 min is fine -- the app gates itself)
+   Sends at         REMINDER_HOUR (09:00) in TIME_ZONE
+   Seed data        python manage.py seed_items
 
-Seed some sample data to look at (run once, from a local shell with the same
-MONGODB_URI):
-
-   python manage.py seed_items
+render.yaml in this folder is the same deployment as a blueprint, if you would
+rather click "New Blueprint Instance" than fill the forms in by hand.
 
 
 ===============================================================================
@@ -202,36 +405,56 @@ MONGODB_URI):
 ===============================================================================
 
  Build fails, "requirements.txt not found"
-     Root Directory is not set to  backend
+     Root Directory is not set to  backend   (step 5)
 
- /api/health/ times out
-     Atlas Network Access is missing 0.0.0.0/0
+ /api/health/ says "disconnected", or times out
+     Atlas Network Access is missing 0.0.0.0/0, or the password in
+     MONGODB_URI has an unencoded special character   (step 2)
 
  Health check fails but the site loads
      The path must be  /api/health/  WITH the trailing slash
 
- 401 on every request right after logging in
-     AUTH_COOKIE_SECURE=True and AUTH_COOKIE_SAMESITE=None are missing
+ Login succeeds, then every request returns 401
+     AUTH_COOKIE_SECURE=True and AUTH_COOKIE_SAMESITE=None are missing.
+     The browser is accepting the login response and dropping the cookie.
 
- CORS error in the browser
-     CORS_ALLOWED_ORIGINS must exactly match the frontend URL,
-     with https:// and no trailing slash
+ CORS error in the browser console
+     CORS_ALLOWED_ORIGINS does not exactly match the frontend URL   (step 9)
 
- Cron job returns 401
-     CRON_TOKEN differs between the web service and the cron job, or it is
-     unset on the web service (which restricts that route to signed-in users)
+ The monitor URL returns 401
+     The token in the URL does not match CRON_TOKEN on the web service, or
+     CRON_TOKEN is unset there -- which restricts that route to signed-in
+     users only. Check for a trailing space when you pasted it.
 
- No reminder emails, cron log says "0 due"
+ UptimeRobot says the monitor is DOWN
+     Open the URL by hand and read the body. A 401 is the token (above). A
+     502/503 on a free Render plan is usually a cold start -- the monitor
+     itself keeps the service warm once it is running.
+
+ No reminder emails, and the response says "due": 0
      Correct behaviour, not a bug. Nothing expires in exactly 30, 7, 1 or 0
      days today. Check the Reminders screen for the upcoming schedule.
 
- No reminder emails, log says "failed"
-     Open the Reminders screen -> History. A failed row shows the attempt
-     count; the next sweep retries it. Usually Brevo Authorised IPs (step 5)
-     or a sender address that is not verified.
+ No reminder emails, and "Last ran" is stale or empty
+     The monitor is not reaching the API. Check it exists, is not paused,
+     and that its URL still matches CRON_TOKEN.
 
- Reminders only arrive on days I open the app
-     That is the design without step 3. Add the cron job.
+ Reminders arrive around midnight instead of 9am
+     REMINDER_HOUR is unset (or 0), or TIME_ZONE is wrong -- the hour is read
+     against TIME_ZONE, not UTC.
+
+ No reminder emails, and the log says "failed"
+     Reminders screen -> History. A failed row shows the attempt count and
+     the next sweep retries it. Usually Brevo Authorised IPs still switched
+     on, or a sender address that was never verified   (step 3)
+
+ No reminders at all, ever
+     Step 7 was skipped. Without a monitor calling the URL, nothing sends
+     automatically -- only the "Send Due Now" button does.
 
  Reminder dates are one day out
-     TIME_ZONE is wrong on the web service.
+     TIME_ZONE is wrong on the web service   (step 5)
+
+ The app is slow to open the first time each day
+     Render free services sleep after 15 minutes idle. The monitor from step
+     7 keeps yours awake as a side effect.

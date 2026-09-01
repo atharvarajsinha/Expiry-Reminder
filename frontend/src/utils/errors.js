@@ -176,11 +176,6 @@ const STATUS_TO_CODE = {
   500: ERROR_CODE.INTERNAL_ERROR,
 };
 
-/** Convenience wrapper: the message only. */
-export function getErrorMessage(error) {
-  return getApiError(error).message;
-}
-
 /**
  * Flattens DRF validation details into `{ fieldName: 'first message' }` so a
  * form can show the error next to the offending input.

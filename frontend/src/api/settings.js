@@ -9,8 +9,8 @@
  * and is stored as such, not treated as "unset".
  *
  * The response also carries a read-only `delivery` block describing what is
- * actually wired up on the server (is email configured? is a cron token set?
- * when did the sweep last run?). It contains booleans and dates only; no key
+ * actually wired up on the server (is email configured? is the daily cron job
+ * set up? when did it last run?). It contains booleans and dates only; no key
  * is ever returned.
  */
 import { client, unwrap } from './client.js';
@@ -44,7 +44,7 @@ function mapSettings(raw) {
     delivery: {
       emailConfigured: Boolean(raw?.delivery?.email_configured),
       cronConfigured: Boolean(raw?.delivery?.cron_configured),
-      sweepOnRequest: Boolean(raw?.delivery?.sweep_on_request),
+      reminderHour: raw?.delivery?.reminder_hour ?? 9,
       expiringSoonDays: raw?.delivery?.expiring_soon_days ?? 30,
       timezone: raw?.delivery?.timezone ?? null,
       sweep: {
@@ -53,13 +53,6 @@ function mapSettings(raw) {
       },
     },
   };
-}
-
-/** The offsets that apply to a category, falling back to `default`. */
-export function offsetsFor(reminders, category) {
-  if (!reminders) return [];
-  if (Array.isArray(reminders[category])) return reminders[category];
-  return reminders.default || [];
 }
 
 /** `GET /api/settings/` */
