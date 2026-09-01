@@ -1,9 +1,9 @@
 """MongoDB access layer.
 
 A single lazily created :class:`~pymongo.mongo_client.MongoClient` per process
-(re-created after a fork so Celery pre-fork workers stay safe).  Collections
-are exposed through tiny accessor functions instead of a repository class --
-this project is small enough that a service layer is plenty.
+(re-created after a fork so multi-worker gunicorn stays safe).  Collections are
+exposed through tiny accessor functions instead of a repository class -- this
+project is small enough that a service layer is plenty.
 """
 
 from __future__ import annotations
@@ -20,8 +20,7 @@ from core.errors import ApiError, ErrorCode
 
 logger = logging.getLogger(__name__)
 
-VEHICLES = "vehicles"
-JOBS = "jobs"
+ITEMS = "items"
 REMINDERS = "reminders"
 SETTINGS = "settings"
 
@@ -50,7 +49,7 @@ def get_client():
             tzinfo=dt.timezone.utc,
             serverSelectionTimeoutMS=settings.MONGODB_TIMEOUT_MS,
             connectTimeoutMS=settings.MONGODB_TIMEOUT_MS,
-            appname="vehicle-reminder",
+            appname="expiry-reminder",
         )
         _client_pid = pid
     return _client
@@ -74,12 +73,8 @@ def close_client():
     _client_pid = None
 
 
-def vehicles_collection():
-    return get_db()[VEHICLES]
-
-
-def jobs_collection():
-    return get_db()[JOBS]
+def items_collection():
+    return get_db()[ITEMS]
 
 
 def reminders_collection():
@@ -94,20 +89,25 @@ def ensure_indexes(force=False):
     """Create the indexes the application relies on.
 
     The compound reminder index is what makes duplicate reminder emails
-    impossible even when the daily task runs more than once.
+    impossible even when the sweep runs more than once in a day, or when two
+    web workers reach it at the same moment.
     """
     global _indexes_ready
     if _indexes_ready and not force:
         return
     db = get_db()
-    db[VEHICLES].create_index([("vehicle_no", ASCENDING)], unique=True, name="uniq_vehicle_no")
-    db[VEHICLES].create_index([("created_at", DESCENDING)], name="vehicle_created_at")
-    db[JOBS].create_index([("job_id", ASCENDING)], unique=True, name="uniq_job_id")
-    db[JOBS].create_index([("created_at", DESCENDING)], name="job_created_at")
+    db[ITEMS].create_index([("category", ASCENDING)], name="item_category")
+    db[ITEMS].create_index(
+        [("category", ASCENDING), ("identifier_key", ASCENDING)],
+        name="item_category_identifier",
+    )
+    db[ITEMS].create_index([("created_at", DESCENDING)], name="item_created_at")
+    # Sorting the sweep's candidate set by soonest expiry keeps it cheap.
+    db[ITEMS].create_index([("next_expiry_on", ASCENDING)], name="item_next_expiry")
     db[REMINDERS].create_index(
         [
-            ("vehicle_id", ASCENDING),
-            ("document_type", ASCENDING),
+            ("item_id", ASCENDING),
+            ("expiry_key", ASCENDING),
             ("expiry_date", ASCENDING),
             ("reminder_type", ASCENDING),
         ],

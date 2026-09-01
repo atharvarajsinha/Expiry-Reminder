@@ -1,8 +1,11 @@
-"""Reminder settings: recipient address and per-document day offsets.
+"""Reminder settings: the recipient address and the day offsets per category.
 
-Defaults come from the environment; anything saved through the API is stored
-in a single MongoDB document.  No secret (Brevo key, FireAPI key, JWT secret)
-is ever stored or returned here.
+Offsets are stored per category with a ``default`` entry as the fallback, so a
+new category added to ``items.categories`` works immediately without a
+migration or a settings edit.  Defaults come from the environment; anything
+saved through the API lives in a single MongoDB document.
+
+No secret (Brevo key, JWT secret, cron token) is stored or returned here.
 """
 
 from __future__ import annotations
@@ -14,21 +17,40 @@ from pymongo.errors import PyMongoError
 
 from core import mongo
 from core.dates import iso_datetime, now_utc
+from items.categories import CATEGORY_KEYS, DEFAULT_OFFSET_KEY
 
 logger = logging.getLogger(__name__)
 
 SETTINGS_ID = "app_settings"
-DOCUMENT_TYPES = ("insurance", "pucc")
+
+# Every key an offsets map may carry.
+OFFSET_KEYS = (DEFAULT_OFFSET_KEY,) + CATEGORY_KEYS
+
+MAX_OFFSETS_PER_CATEGORY = 10
+MAX_OFFSET_DAYS = 365
 
 
 def default_settings():
-    return {
-        "reminder_email": django_settings.REMINDER_EMAIL,
-        "reminders": {
-            "insurance": list(django_settings.DEFAULT_REMINDER_OFFSETS["insurance"]),
-            "pucc": list(django_settings.DEFAULT_REMINDER_OFFSETS["pucc"]),
-        },
-    }
+    """Environment defaults: one shared list, per-category overrides on top."""
+    base = list(django_settings.DEFAULT_REMINDER_OFFSETS)
+    reminders = {DEFAULT_OFFSET_KEY: base}
+    for key in CATEGORY_KEYS:
+        override = django_settings.REMINDER_OFFSET_OVERRIDES.get(key)
+        reminders[key] = list(override) if override else list(base)
+    return {"reminder_email": django_settings.REMINDER_EMAIL, "reminders": reminders}
+
+
+def clean_offsets(values):
+    """De-duplicate, clamp and sort one list of day offsets (descending)."""
+    cleaned = set()
+    for value in values or []:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= number <= MAX_OFFSET_DAYS:
+            cleaned.add(number)
+    return sorted(cleaned, reverse=True)[:MAX_OFFSETS_PER_CATEGORY]
 
 
 def get_settings():
@@ -43,10 +65,12 @@ def get_settings():
         return {**defaults, "updated_at": None}
 
     reminders = dict(defaults["reminders"])
-    for document_type in DOCUMENT_TYPES:
-        offsets = (stored.get("reminders") or {}).get(document_type)
-        if isinstance(offsets, list) and offsets:
-            reminders[document_type] = [int(value) for value in offsets]
+    for key in OFFSET_KEYS:
+        offsets = (stored.get("reminders") or {}).get(key)
+        # An empty list is a real choice -- "never email me about cards" -- so
+        # only a missing key falls back to the default.
+        if isinstance(offsets, list):
+            reminders[key] = clean_offsets(offsets)
 
     return {
         "reminder_email": stored.get("reminder_email") or defaults["reminder_email"],
@@ -63,13 +87,10 @@ def update_settings(payload):
         changes["reminder_email"] = payload["reminder_email"]
 
     if "reminders" in payload:
-        current = get_settings()["reminders"]
-        reminders = dict(current)
-        for document_type, offsets in (payload["reminders"] or {}).items():
-            if document_type in DOCUMENT_TYPES:
-                reminders[document_type] = sorted(
-                    {int(value) for value in offsets}, reverse=True
-                )
+        reminders = dict(get_settings()["reminders"])
+        for key, offsets in (payload["reminders"] or {}).items():
+            if key in OFFSET_KEYS:
+                reminders[key] = clean_offsets(offsets)
         changes["reminders"] = reminders
 
     try:
@@ -83,8 +104,11 @@ def update_settings(payload):
     return get_settings()
 
 
-def reminder_offsets(document_type):
-    return get_settings()["reminders"].get(document_type, [])
+def reminder_offsets(category):
+    reminders = get_settings()["reminders"]
+    if category in reminders:
+        return reminders[category]
+    return reminders.get(DEFAULT_OFFSET_KEY, [])
 
 
 def reminder_recipient():

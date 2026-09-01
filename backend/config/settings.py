@@ -1,4 +1,4 @@
-"""Django settings for the Vehicle Document Reminder backend.
+"""Django settings for the Expiry Reminders backend.
 
 Every secret and every environment specific value is read from the
 environment (see ``.env.example``).  Nothing sensitive is hardcoded here.
@@ -7,6 +7,10 @@ This project deliberately does **not** use the Django ORM: MongoDB is the one
 and only application database, so ``DATABASES`` is empty, there are no
 migrations and ``django.contrib.auth`` / ``sessions`` / ``admin`` are not
 installed.
+
+There is also no broker, no worker and no scheduler.  A single web process is
+the entire backend; the daily reminder sweep rides on the first request of the
+day (see ``core.middleware.ReminderSweepMiddleware``).
 """
 
 from __future__ import annotations
@@ -94,8 +98,7 @@ INSTALLED_APPS = [
     "rest_framework",
     "corsheaders",
     "authentication",
-    "vehicles",
-    "jobs",
+    "items",
     "reminders",
     "appsettings",
     "health",
@@ -107,6 +110,8 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "core.middleware.SecurityHeadersMiddleware",
     "core.middleware.RequestLogMiddleware",
+    # Last, so the sweep runs after the response has been built.
+    "core.middleware.ReminderSweepMiddleware",
 ]
 
 TEMPLATES = [
@@ -135,7 +140,7 @@ LANGUAGE_CODE = "en-us"
 # MongoDB
 # ---------------------------------------------------------------------------
 MONGODB_URI = env("MONGODB_URI", "mongodb://localhost:27017/")
-MONGODB_DATABASE = env("MONGODB_DATABASE", "vehicle_reminder")
+MONGODB_DATABASE = env("MONGODB_DATABASE", "expiry_reminder")
 MONGODB_TIMEOUT_MS = env_int("MONGODB_TIMEOUT_MS", 5000)
 
 
@@ -149,7 +154,7 @@ JWT_SECRET_KEY = env("JWT_SECRET_KEY") or SECRET_KEY
 JWT_ALGORITHM = env("JWT_ALGORITHM", "HS256")
 JWT_ACCESS_TOKEN_LIFETIME_MINUTES = env_int("JWT_ACCESS_TOKEN_LIFETIME_MINUTES", 60)
 JWT_REFRESH_TOKEN_LIFETIME_DAYS = env_int("JWT_REFRESH_TOKEN_LIFETIME_DAYS", 14)
-JWT_ISSUER = env("JWT_ISSUER", "vehicle-reminder")
+JWT_ISSUER = env("JWT_ISSUER", "expiry-reminder")
 
 # Cookie based token storage (the frontend never touches localStorage).
 AUTH_COOKIE_ACCESS_NAME = env("AUTH_COOKIE_ACCESS_NAME", "access_token")
@@ -168,73 +173,66 @@ CSRF_HEADER_NAME = env("CSRF_HEADER_NAME", "X-CSRF-Token")
 
 
 # ---------------------------------------------------------------------------
-# FireAPI (external vehicle information provider)
-# ---------------------------------------------------------------------------
-FIREAPI_URL = env("FIREAPI_URL", "https://api.fireapi.io/secure-app/rc-vehicle-info/v1")
-FIREAPI_API_KEY = env("FIREAPI_API_KEY")
-# The exact header name may change, so it is configurable.
-FIREAPI_API_KEY_HEADER = env("FIREAPI_API_KEY_HEADER", "Authorization")
-# When the header is Authorization a scheme prefix is usually required.
-FIREAPI_API_KEY_PREFIX = env("FIREAPI_API_KEY_PREFIX", "")
-FIREAPI_QUERY_PARAM = env("FIREAPI_QUERY_PARAM", "vehicle_no")
-FIREAPI_TIMEOUT = env_int("FIREAPI_TIMEOUT", 60)
-FIREAPI_CONNECT_TIMEOUT = env_int("FIREAPI_CONNECT_TIMEOUT", 10)
-
-
-# ---------------------------------------------------------------------------
 # Brevo transactional email
 # ---------------------------------------------------------------------------
 BREVO_API_URL = env("BREVO_API_URL", "https://api.brevo.com/v3/smtp/email")
 BREVO_API_KEY = env("BREVO_API_KEY")
 BREVO_SENDER_EMAIL = env("BREVO_SENDER_EMAIL")
-BREVO_SENDER_NAME = env("BREVO_SENDER_NAME", "Vehicle Reminder")
+BREVO_SENDER_NAME = env("BREVO_SENDER_NAME", "Expiry Reminders")
 BREVO_TIMEOUT = env_int("BREVO_TIMEOUT", 30)
 REMINDER_EMAIL = env("REMINDER_EMAIL")
 
-# A document is shown as "Expiring Soon" this many days before expiry.
+
+# ---------------------------------------------------------------------------
+# Reminders
+# ---------------------------------------------------------------------------
+# An expiry is shown as "Expiring Soon" this many days before the date.
 EXPIRING_SOON_DAYS = env_int("EXPIRING_SOON_DAYS", 30)
 
-DEFAULT_REMINDER_OFFSETS = {
-    "insurance": env_int_list("REMINDER_OFFSETS_INSURANCE", [7, 1, 0]),
-    "pucc": env_int_list("REMINDER_OFFSETS_PUCC", [7, 1, 0]),
+# Days before expiry to send on. Applies to every category unless that
+# category has an override below or a saved setting in the database.
+DEFAULT_REMINDER_OFFSETS = env_int_list("REMINDER_OFFSETS", [30, 7, 1, 0])
+
+# Optional per-category defaults, e.g. REMINDER_OFFSETS_CREDIT_CARD=30,7
+REMINDER_OFFSET_OVERRIDES = {
+    key: env_int_list("REMINDER_OFFSETS_%s" % key.upper(), [])
+    for key in (
+        "vehicle",
+        "credit_card",
+        "debit_card",
+        "document",
+        "insurance",
+        "subscription",
+        "warranty",
+        "other",
+    )
 }
 
+# The scheduler, such as it is: the first API request of each calendar day
+# runs the sweep. Turn it off if an external cron is the only trigger you
+# want (see CRON_TOKEN).
+REMINDER_SWEEP_ON_REQUEST = env_bool("REMINDER_SWEEP_ON_REQUEST", True)
 
-# ---------------------------------------------------------------------------
-# Celery / Redis
-# ---------------------------------------------------------------------------
-REDIS_URL = env("REDIS_URL", "redis://localhost:6379/0")
-CELERY_BROKER_URL = env("CELERY_BROKER_URL", REDIS_URL)
-CELERY_RESULT_BACKEND = env("CELERY_RESULT_BACKEND", REDIS_URL)
-CELERY_TIMEZONE = TIME_ZONE
-CELERY_ENABLE_UTC = True
-CELERY_TASK_ALWAYS_EAGER = env_bool("CELERY_TASK_ALWAYS_EAGER", False)
-CELERY_TASK_TIME_LIMIT = env_int("CELERY_TASK_TIME_LIMIT", 300)
-CELERY_TASK_SOFT_TIME_LIMIT = env_int("CELERY_TASK_SOFT_TIME_LIMIT", 270)
-
-# Daily reminder sweep (local project timezone).
-REMINDER_CHECK_HOUR = env_int("REMINDER_CHECK_HOUR", 9)
-REMINDER_CHECK_MINUTE = env_int("REMINDER_CHECK_MINUTE", 0)
+# Shared secret for POST /api/reminders/run/ so an external scheduler can send
+# reminders on days nobody opens the app. Unset means that route is
+# signed-in-users only.
+CRON_TOKEN = env("CRON_TOKEN")
 
 
 # ---------------------------------------------------------------------------
-# Cache (used by DRF throttling; shared across processes when Redis is up)
+# Cache (used by DRF throttling)
 # ---------------------------------------------------------------------------
-if env_bool("USE_REDIS_CACHE", True) and REDIS_URL:
-    CACHES = {
-        "default": {
-            "BACKEND": "django.core.cache.backends.redis.RedisCache",
-            "LOCATION": REDIS_URL,
-            "TIMEOUT": 300,
-        }
+# In-process only. Throttle counters are therefore per web worker, which is
+# the right trade for a single-user app that has no Redis to share them
+# through: the limits below are generous enough that per-worker counting
+# cannot lock anyone out.
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "expiry-reminder",
+        "TIMEOUT": 300,
     }
-else:  # pragma: no cover - local fallback
-    CACHES = {
-        "default": {
-            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
-            "LOCATION": "vehicle-reminder",
-        }
-    }
+}
 
 
 # ---------------------------------------------------------------------------
@@ -256,9 +254,8 @@ REST_FRAMEWORK = {
     ],
     "DEFAULT_THROTTLE_RATES": {
         "login": env("THROTTLE_LOGIN", "10/min"),
-        "vehicle_fetch": env("THROTTLE_VEHICLE_FETCH", "20/hour"),
-        "vehicle_refresh": env("THROTTLE_VEHICLE_REFRESH", "30/hour"),
         "read": env("THROTTLE_READ", "240/min"),
+        "write": env("THROTTLE_WRITE", "60/min"),
     },
     "UNICODE_JSON": True,
 }
@@ -267,11 +264,10 @@ REST_FRAMEWORK = {
 # ---------------------------------------------------------------------------
 # CORS (the frontend runs on a different origin and sends cookies)
 # ---------------------------------------------------------------------------
-FRONTEND_URL = env("FRONTEND_URL", "http://localhost:5174")
+FRONTEND_URL = env("FRONTEND_URL", "http://localhost:5173")
 CORS_ALLOWED_ORIGINS = env_list("CORS_ALLOWED_ORIGINS") or (
     [FRONTEND_URL] if FRONTEND_URL else []
 )
-print(CORS_ALLOWED_ORIGINS)
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_HEADERS = [
     "accept",
@@ -333,7 +329,6 @@ LOGGING = {
             "level": "WARNING",
             "propagate": False,
         },
-        "celery": {"handlers": ["console"], "level": LOG_LEVEL, "propagate": False},
         "pymongo": {"handlers": ["console"], "level": "WARNING", "propagate": False},
         "urllib3": {"handlers": ["console"], "level": "WARNING", "propagate": False},
     },
@@ -344,7 +339,7 @@ SENSITIVE_SETTING_NAMES = [
     "SECRET_KEY",
     "JWT_SECRET_KEY",
     "APP_PASSWORD",
-    "FIREAPI_API_KEY",
     "BREVO_API_KEY",
+    "CRON_TOKEN",
     "MONGODB_URI",
 ]

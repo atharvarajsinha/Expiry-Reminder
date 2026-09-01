@@ -2,41 +2,49 @@
   <div style="max-width:560px;margin:0 auto;background:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e4e7eb;">
 
     <div style="background:{% if days_remaining == 0 %}#b42318{% elif days_remaining == 1 %}#c4320a{% else %}#175cd3{% endif %};padding:20px 24px;">
-      <p style="margin:0;color:#ffffff;font-size:13px;letter-spacing:.08em;text-transform:uppercase;">Vehicle Document Reminder</p>
+      <p style="margin:0;color:#ffffff;font-size:13px;letter-spacing:.08em;text-transform:uppercase;">Expiry Reminder</p>
       <h1 style="margin:6px 0 0;color:#ffffff;font-size:20px;line-height:1.35;">
-        {{ document_label }} {{ urgency }}
+        {{ expiry_label }} {{ urgency }}
       </h1>
     </div>
 
     <div style="padding:24px;">
       <p style="margin:0 0 20px;font-size:15px;line-height:1.6;">
-        Your vehicle {{ document_label|lower }} for <strong>{{ vehicle_no }}</strong> {{ urgency }}.
-        Please renew it before the expiry date to stay compliant.
+        The {{ expiry_label|lower }} for <strong>{{ item_name }}</strong> {{ urgency }}.
+        Please renew it before the expiry date.
       </p>
 
       <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;font-size:14px;">
         <tr>
-          <td style="padding:10px 0;border-bottom:1px solid #eef0f3;color:#6b7280;width:45%;">Vehicle Number</td>
-          <td style="padding:10px 0;border-bottom:1px solid #eef0f3;font-weight:600;">{{ vehicle_no }}</td>
+          <td style="padding:10px 0;border-bottom:1px solid #eef0f3;color:#6b7280;width:45%;">{{ category_label }}</td>
+          <td style="padding:10px 0;border-bottom:1px solid #eef0f3;font-weight:600;">{{ item_name }}</td>
         </tr>
+        {% if identifier %}
         <tr>
-          <td style="padding:10px 0;border-bottom:1px solid #eef0f3;color:#6b7280;">Vehicle</td>
-          <td style="padding:10px 0;border-bottom:1px solid #eef0f3;font-weight:600;">{{ maker_model }}</td>
-        </tr>
-        <tr>
-          <td style="padding:10px 0;border-bottom:1px solid #eef0f3;color:#6b7280;">Document</td>
-          <td style="padding:10px 0;border-bottom:1px solid #eef0f3;font-weight:600;">{{ document_label }}</td>
-        </tr>
-        {% if company %}
-        <tr>
-          <td style="padding:10px 0;border-bottom:1px solid #eef0f3;color:#6b7280;">Insurance Company</td>
-          <td style="padding:10px 0;border-bottom:1px solid #eef0f3;font-weight:600;">{{ company }}</td>
+          <td style="padding:10px 0;border-bottom:1px solid #eef0f3;color:#6b7280;">Reference</td>
+          <td style="padding:10px 0;border-bottom:1px solid #eef0f3;font-weight:600;">{{ identifier }}</td>
         </tr>
         {% endif %}
-        {% if reference_no %}
+        {% if issuer %}
         <tr>
-          <td style="padding:10px 0;border-bottom:1px solid #eef0f3;color:#6b7280;">{{ reference_label }}</td>
-          <td style="padding:10px 0;border-bottom:1px solid #eef0f3;font-weight:600;">{{ reference_no }}</td>
+          <td style="padding:10px 0;border-bottom:1px solid #eef0f3;color:#6b7280;">Issued by</td>
+          <td style="padding:10px 0;border-bottom:1px solid #eef0f3;font-weight:600;">{{ issuer }}</td>
+        </tr>
+        {% endif %}
+        {% if holder %}
+        <tr>
+          <td style="padding:10px 0;border-bottom:1px solid #eef0f3;color:#6b7280;">Held by</td>
+          <td style="padding:10px 0;border-bottom:1px solid #eef0f3;font-weight:600;">{{ holder }}</td>
+        </tr>
+        {% endif %}
+        <tr>
+          <td style="padding:10px 0;border-bottom:1px solid #eef0f3;color:#6b7280;">What expires</td>
+          <td style="padding:10px 0;border-bottom:1px solid #eef0f3;font-weight:600;">{{ expiry_label }}</td>
+        </tr>
+        {% if reference %}
+        <tr>
+          <td style="padding:10px 0;border-bottom:1px solid #eef0f3;color:#6b7280;">Number</td>
+          <td style="padding:10px 0;border-bottom:1px solid #eef0f3;font-weight:600;">{{ reference }}</td>
         </tr>
         {% endif %}
         <tr>
@@ -53,15 +61,15 @@
 
       {% if frontend_url %}
       <p style="margin:24px 0 0;">
-        <a href="{{ frontend_url }}" style="display:inline-block;background:#175cd3;color:#ffffff;text-decoration:none;padding:11px 20px;border-radius:8px;font-size:14px;font-weight:600;">Open Vehicle Reminder</a>
+        <a href="{{ frontend_url }}" style="display:inline-block;background:#175cd3;color:#ffffff;text-decoration:none;padding:11px 20px;border-radius:8px;font-size:14px;font-weight:600;">Open Expiry Reminders</a>
       </p>
       {% endif %}
     </div>
 
     <div style="padding:16px 24px;background:#f9fafb;border-top:1px solid #eef0f3;">
       <p style="margin:0;font-size:12px;color:#6b7280;line-height:1.5;">
-        Automated reminder from your personal Vehicle Document Reminder.
-        Renew your {{ document_label|lower }} before {{ expiry_date }}.
+        Automated reminder from your personal expiry tracker.
+        Renew before {{ expiry_date }}.
       </p>
     </div>
 

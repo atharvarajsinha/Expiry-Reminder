@@ -1,13 +1,14 @@
-# Render blueprint: three services from one repository/image.
-#   web    -> Gunicorn
-#   worker -> Celery worker
-#   beat   -> Celery Beat
+# Render blueprint: one web service, and one optional cron job.
 #
-# MongoDB comes from MongoDB Atlas (set MONGODB_URI). Redis is a Render Key
-# Value instance, wired in below via fromService.
+# There is no Redis, no worker and no Celery Beat. The web service runs the
+# daily reminder sweep on the first request of each day; the cron job below is
+# what makes reminders arrive on days nobody opens the app. Drop it if you are
+# happy for email to depend on the app being visited.
+#
+# MongoDB comes from MongoDB Atlas (set MONGODB_URI).
 services:
   - type: web
-    name: vehicle-reminder-api
+    name: expiry-reminder-api
     runtime: docker
     plan: starter
     dockerfilePath: ./Dockerfile
@@ -20,6 +21,9 @@ services:
         generateValue: true
       - key: JWT_SECRET_KEY
         generateValue: true
+      # The shared secret the cron job below presents as X-Cron-Token.
+      - key: CRON_TOKEN
+        generateValue: true
       - key: APP_USERNAME
         sync: false
       - key: APP_PASSWORD
@@ -27,11 +31,7 @@ services:
       - key: MONGODB_URI
         sync: false
       - key: MONGODB_DATABASE
-        value: vehicle_reminder
-      - key: FIREAPI_API_KEY
-        sync: false
-      - key: FIREAPI_API_KEY_HEADER
-        value: Authorization
+        value: expiry_reminder
       - key: BREVO_API_KEY
         sync: false
       - key: BREVO_SENDER_EMAIL
@@ -48,36 +48,20 @@ services:
         value: "True"
       - key: AUTH_COOKIE_SAMESITE
         value: None
-      - key: REDIS_URL
-        fromService:
-          type: keyvalue
-          name: vehicle-reminder-redis
-          property: connectionString
 
-  - type: worker
-    name: vehicle-reminder-worker
+  # 09:00 Asia/Kolkata == 03:30 UTC. Render cron schedules are UTC.
+  - type: cron
+    name: expiry-reminder-sweep
     runtime: docker
     plan: starter
+    schedule: "30 3 * * *"
     dockerfilePath: ./Dockerfile
-    dockerCommand: ./entrypoint.sh worker
+    dockerCommand: >-
+      sh -c "curl -fsS -X POST -H \"X-Cron-Token: $CRON_TOKEN\" $API_URL/api/reminders/run/"
     envVars:
-      - fromGroup: vehicle-reminder-shared
-
-  - type: worker
-    name: vehicle-reminder-beat
-    runtime: docker
-    plan: starter
-    dockerfilePath: ./Dockerfile
-    dockerCommand: ./entrypoint.sh beat
-    envVars:
-      - fromGroup: vehicle-reminder-shared
-
-  - type: keyvalue
-    name: vehicle-reminder-redis
-    plan: starter
-    ipAllowList: []
-
-# Create an environment group named "vehicle-reminder-shared" in the Render
-# dashboard holding every variable from .env.example (MONGODB_URI, REDIS_URL,
-# APP_*, JWT_SECRET_KEY, FIREAPI_*, BREVO_*, REMINDER_EMAIL, TIME_ZONE ...)
-# and attach it to all three services so they stay in sync.
+      # Copy the generated value from the web service, and set API_URL to its
+      # public URL (https://expiry-reminder-api.onrender.com).
+      - key: CRON_TOKEN
+        sync: false
+      - key: API_URL
+        sync: false

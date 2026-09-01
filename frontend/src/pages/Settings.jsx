@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bell, Mail, Save, ShieldCheck, Wind } from 'lucide-react';
+import { Bell, Clock, Mail, Save, Server } from 'lucide-react';
 
 import { Alert } from '../components/common/Alert.jsx';
 import { Button } from '../components/common/Button.jsx';
+import { DetailList, SectionCard } from '../components/common/DetailList.jsx';
 import { ErrorState } from '../components/common/ErrorState.jsx';
 import { Input } from '../components/common/Input.jsx';
 import { Skeleton, SkeletonGroup } from '../components/common/Skeleton.jsx';
-import { SectionCard } from '../components/vehicles/DetailList.jsx';
+import { getCategories } from '../api/items.js';
 import { getSettings, updateSettings } from '../api/settings.js';
 import { useOnlineStatus } from '../hooks/useOnlineStatus.js';
 import { useToast } from '../hooks/useToast.js';
+import { categoryIcon } from '../utils/categories.js';
 import { cn } from '../utils/cn.js';
 import { formatDateTime } from '../utils/date.js';
 import { ERROR_CODE, getApiError, getFieldErrors } from '../utils/errors.js';
@@ -18,10 +20,8 @@ import { offsetLabel } from '../utils/reminders.js';
 /** Offsets offered as checkboxes; anything else already saved is kept too. */
 const PRESET_OFFSETS = [30, 7, 1, 0];
 
-const DOCUMENTS = [
-  { key: 'insurance', label: 'Insurance Reminders', icon: ShieldCheck },
-  { key: 'pucc', label: 'PUC Reminders', icon: Wind },
-];
+/** The fallback row, shown first: it covers every category without its own. */
+const DEFAULT_KEY = 'default';
 
 function sortedDesc(values) {
   return [...new Set(values)].sort((a, b) => b - a);
@@ -64,45 +64,53 @@ function Checkbox({ id, label, checked, onChange, disabled }) {
  * Reminder settings: where reminders go, and how far ahead they are sent.
  *
  * An offset is "days before expiry": `[7, 1, 0]` means a week before, a day
- * before, and on the day itself. Offsets already saved that are not one of the
- * presets stay on screen as their own checkbox, so editing the email can never
- * silently drop a schedule someone set elsewhere.
+ * before, and on the day itself. Every category gets its own schedule (an
+ * annual fee wants a month's notice; a domain renewal wants a week), with a
+ * `default` row covering anything not set explicitly.
+ *
+ * Offsets already saved that are not one of the presets stay on screen as their
+ * own checkbox, so editing the email can never silently drop a schedule set
+ * elsewhere - through the API or an environment variable.
  */
 export default function Settings() {
   const toast = useToast();
   const isOnline = useOnlineStatus();
 
   const [loaded, setLoaded] = useState(null);
+  const [categories, setCategories] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
 
   const [email, setEmail] = useState('');
-  const [offsets, setOffsets] = useState({ insurance: [], pucc: [] });
+  const [offsets, setOffsets] = useState({});
   const [isSaving, setIsSaving] = useState(false);
   const [fieldErrors, setFieldErrors] = useState({});
   const [saveError, setSaveError] = useState(null);
   const [savedAt, setSavedAt] = useState(null);
 
-  // Presets plus whatever was already stored, so nothing gets lost.
-  const extraOffsets = useRef({ insurance: [], pucc: [] });
+  // Non-preset offsets per key, so nothing already stored gets lost.
+  const extraOffsets = useRef({});
 
   const applySettings = useCallback((settings) => {
     setLoaded(settings);
     setEmail(settings.reminderEmail || '');
-    setOffsets({
-      insurance: sortedDesc(settings.reminders.insurance),
-      pucc: sortedDesc(settings.reminders.pucc),
-    });
-    extraOffsets.current = {
-      insurance: settings.reminders.insurance.filter((v) => !PRESET_OFFSETS.includes(v)),
-      pucc: settings.reminders.pucc.filter((v) => !PRESET_OFFSETS.includes(v)),
-    };
+
+    const next = {};
+    const extras = {};
+    for (const [key, values] of Object.entries(settings.reminders)) {
+      next[key] = sortedDesc(values);
+      extras[key] = values.filter((value) => !PRESET_OFFSETS.includes(value));
+    }
+    setOffsets(next);
+    extraOffsets.current = extras;
   }, []);
 
   const load = useCallback(async () => {
     setIsLoading(true);
     try {
-      applySettings(await getSettings());
+      const [settings, catalogue] = await Promise.all([getSettings(), getCategories()]);
+      applySettings(settings);
+      setCategories(catalogue);
       setLoadError(null);
     } catch (requestError) {
       const apiError = getApiError(requestError);
@@ -116,24 +124,50 @@ export default function Settings() {
     load();
   }, [load]);
 
-  const optionsFor = (key) => sortedDesc([...PRESET_OFFSETS, ...extraOffsets.current[key]]);
+  /**
+   * The rows to render: the fallback first, then one per category the server
+   * knows about. Built from the catalogue rather than from the settings keys so
+   * a category added on the backend appears here immediately.
+   */
+  const rows = useMemo(
+    () => [
+      {
+        key: DEFAULT_KEY,
+        label: 'Every other category',
+        icon: Bell,
+        description: 'Used for any category without its own schedule below.',
+      },
+      ...categories.map((category) => ({
+        key: category.key,
+        label: category.plural,
+        icon: categoryIcon(category.icon),
+        description: category.description,
+      })),
+    ],
+    [categories],
+  );
+
+  const optionsFor = (key) =>
+    sortedDesc([...PRESET_OFFSETS, ...(extraOffsets.current[key] || [])]);
 
   const toggle = (key, offset, checked) => {
-    setOffsets((current) => ({
-      ...current,
-      [key]: checked
-        ? sortedDesc([...current[key], offset])
-        : current[key].filter((value) => value !== offset),
-    }));
+    setOffsets((current) => {
+      const existing = current[key] || [];
+      return {
+        ...current,
+        [key]: checked
+          ? sortedDesc([...existing, offset])
+          : existing.filter((value) => value !== offset),
+      };
+    });
     setSavedAt(null);
   };
 
   const isDirty = useMemo(() => {
     if (!loaded) return false;
-    return (
-      email.trim() !== (loaded.reminderEmail || '') ||
-      !sameOffsets(offsets.insurance, loaded.reminders.insurance) ||
-      !sameOffsets(offsets.pucc, loaded.reminders.pucc)
+    if (email.trim() !== (loaded.reminderEmail || '')) return true;
+    return Object.keys(offsets).some(
+      (key) => !sameOffsets(offsets[key], loaded.reminders[key]),
     );
   }, [loaded, email, offsets]);
 
@@ -221,6 +255,8 @@ export default function Settings() {
     );
   }
 
+  const delivery = loaded?.delivery;
+
   return (
     <>
       <header className="mb-5">
@@ -253,7 +289,7 @@ export default function Settings() {
             hint={
               fieldErrors.reminder_email
                 ? undefined
-                : 'Expiry reminders for every vehicle are sent to this address.'
+                : 'Expiry reminders for every item are sent to this address.'
             }
             icon={Mail}
             autoComplete="email"
@@ -261,37 +297,84 @@ export default function Settings() {
             disabled={isSaving}
             required
           />
+
+          {delivery && !delivery.emailConfigured ? (
+            <Alert variant="warning" className="mt-3">
+              The server has no mail credentials set, so nothing can be emailed
+              yet. The app will still show you what is expiring.
+            </Alert>
+          ) : null}
         </SectionCard>
 
-        {DOCUMENTS.map(({ key, label, icon: Icon }) => (
-          <SectionCard key={key} icon={Icon} title={label}>
-            <fieldset>
-              <legend className="sr-only">{label}</legend>
-              <div className="grid gap-2.5 sm:grid-cols-2">
-                {optionsFor(key).map((offset) => (
-                  <Checkbox
-                    key={offset}
-                    id={`${key}-${offset}`}
-                    label={offsetLabel(offset)}
-                    checked={offsets[key].includes(offset)}
-                    onChange={(checked) => toggle(key, offset, checked)}
-                    disabled={isSaving}
-                  />
-                ))}
-              </div>
-            </fieldset>
+        {rows.map(({ key, label, icon: Icon, description }) => {
+          const selected = offsets[key] || [];
+          return (
+            <SectionCard key={key} icon={Icon} title={label}>
+              <fieldset>
+                <legend className="mb-3 text-sm text-slate-500 dark:text-slate-400">
+                  {description}
+                </legend>
+                <div className="grid gap-2.5 sm:grid-cols-2">
+                  {optionsFor(key).map((offset) => (
+                    <Checkbox
+                      key={offset}
+                      id={`${key}-${offset}`}
+                      label={offsetLabel(offset)}
+                      checked={selected.includes(offset)}
+                      onChange={(checked) => toggle(key, offset, checked)}
+                      disabled={isSaving}
+                    />
+                  ))}
+                </div>
+              </fieldset>
 
-            {offsets[key].length === 0 ? (
-              <Alert variant="warning" className="mt-3">
-                No reminders will be sent for {key === 'pucc' ? 'PUC' : 'insurance'}.
-              </Alert>
-            ) : null}
-          </SectionCard>
-        ))}
+              {selected.length === 0 ? (
+                <Alert variant="warning" className="mt-3">
+                  No reminders will be sent for {label.toLowerCase()}.
+                </Alert>
+              ) : null}
+            </SectionCard>
+          );
+        })}
+
+        <SectionCard icon={Server} title="How reminders are sent">
+          <p className="mb-4 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+            There is no background worker. The daily check runs on the first
+            request the server handles each day, so opening this app is enough to
+            trigger it.
+            {delivery?.cronConfigured
+              ? ' An external scheduler is also configured, so reminders go out on days you never open the app.'
+              : ' On a day nobody opens the app, nothing is emailed until the next visit.'}
+          </p>
+
+          <DetailList
+            items={[
+              {
+                label: 'Last check ran',
+                value: delivery?.sweep?.lastRunAt
+                  ? formatDateTime(delivery.sweep.lastRunAt)
+                  : null,
+              },
+              {
+                label: 'On-request check',
+                value: delivery?.sweepOnRequest ? 'Enabled' : 'Disabled',
+              },
+              {
+                label: 'External scheduler',
+                value: delivery?.cronConfigured ? 'Configured' : 'Not configured',
+              },
+              {
+                label: 'Expiring soon window',
+                value: delivery ? `${delivery.expiringSoonDays} days` : null,
+              },
+              { label: 'Timezone', value: delivery?.timezone },
+            ]}
+          />
+        </SectionCard>
 
         <div className="surface flex flex-wrap items-center justify-between gap-3 p-4">
           <p className="flex items-center gap-2 text-xs text-slate-400 dark:text-slate-500">
-            <Bell aria-hidden="true" className="h-3.5 w-3.5" />
+            <Clock aria-hidden="true" className="h-3.5 w-3.5" />
             {loaded?.updatedAt
               ? `Last saved ${formatDateTime(loaded.updatedAt)}`
               : 'Using the server defaults'}

@@ -1,9 +1,6 @@
 """Project package.
 
-Importing the Celery application here guarantees that ``@shared_task`` works
-for every app in the project, no matter how Django is started.
+Deliberately empty: there is no Celery application to import here.  The daily
+reminder sweep is driven by ``core.middleware.ReminderSweepMiddleware`` and by
+``POST /api/reminders/run/``, so a single web process is the whole backend.
 """
-
-from config.celery import app as celery_app
-
-__all__ = ("celery_app",)

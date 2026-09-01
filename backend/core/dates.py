@@ -1,4 +1,4 @@
-"""Date parsing, storage conversion and document expiry logic.
+"""Date parsing, storage conversion and expiry logic.
 
 All expiry maths is done on plain ``datetime.date`` objects in the configured
 project timezone (``TIME_ZONE``, default ``Asia/Kolkata``) so a reminder that
@@ -19,7 +19,7 @@ except ImportError:  # pragma: no cover - not reachable on 3.9+
 
 UTC = dt.timezone.utc
 
-# Formats seen in FireAPI payloads (plus a couple of sensible extras).
+# Everything a person might reasonably type, plus the ISO form the UI sends.
 _DATE_FORMATS = (
     "%Y-%m-%d",
     "%d/%m/%Y",
@@ -44,7 +44,7 @@ STATUS_LABELS = {
     STATUS_UNKNOWN: "Unknown",
 }
 
-# Worst status wins when summarising a vehicle.
+# Worst status wins when summarising an item.
 _STATUS_SEVERITY = {
     STATUS_UNKNOWN: 0,
     STATUS_VALID: 1,
@@ -73,7 +73,7 @@ def today_local():
 
 
 def parse_date(value):
-    """Parse the many date shapes FireAPI returns.  ``None`` when unusable."""
+    """Parse the many shapes a date can arrive in.  ``None`` when unusable."""
     if value is None:
         return None
     if isinstance(value, dt.datetime):
@@ -152,8 +152,8 @@ def expiring_soon_days():
     return getattr(settings, "EXPIRING_SOON_DAYS", 30)
 
 
-def document_status(expiry, today=None):
-    """Status block for one document (insurance or PUC).
+def expiry_status(expiry, today=None):
+    """Status block for one expiry date.
 
     Returns ``status``, a human label, the number of days remaining and the
     ISO expiry date -- everything the UI needs to render a badge.
@@ -186,7 +186,7 @@ def document_status(expiry, today=None):
 
 
 def worst_status(statuses):
-    """Overall vehicle status: the most urgent of the given statuses."""
+    """Overall item status: the most urgent of the given statuses."""
     known = [s for s in statuses if s]
     if not known:
         return STATUS_UNKNOWN

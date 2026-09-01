@@ -1,9 +1,9 @@
 {
-  "name": "remind-vahan-frontend",
+  "name": "expiry-reminders-frontend",
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "Remind Vahan - vehicle document reminder PWA tracking insurance and PUC expiry.",
+  "description": "Expiry Reminders - a PWA tracking when documents, cards, vehicle papers and policies expire.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

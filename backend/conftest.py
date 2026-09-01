@@ -27,11 +27,11 @@ def mongo_database():
     from core import mongo
 
     client = mongomock.MongoClient(tz_aware=True)
-    database = client["vehicle_reminder_test"]
+    database = client["expiry_reminder_test"]
     mongo.set_override_db(database)
     mongo.ensure_indexes(force=True)
     yield database
-    client.drop_database("vehicle_reminder_test")
+    client.drop_database("expiry_reminder_test")
     mongo.set_override_db(None)
 
 
@@ -95,87 +95,55 @@ def auth_client(api_client, credentials):
 # ---------------------------------------------------------------------------
 # Sample data
 # ---------------------------------------------------------------------------
+def days_from_now(days):
+    """An ISO date ``days`` from today in the project timezone."""
+    from core.dates import today_local
+
+    return (today_local() + dt.timedelta(days=days)).isoformat()
+
+
 @pytest.fixture
-def fireapi_payload():
-    """A realistic FireAPI success response."""
+def iso_in():
+    return days_from_now
+
+
+@pytest.fixture
+def vehicle_payload():
+    """A valid ``POST /api/items/`` body for a vehicle."""
     return {
-        "status": "success",
-        "data": {
-            "rc_version": "2.0.0",
-            "rc_state_code": "UP",
-            "rc_rto_code": "UP25",
-            "rc_vehicle_no": "UP25AK4922",
-            "rc_is_bh_no_plate": None,
-            "rc_data_source": "MASTER_SERVER",
-            "rc_regn_no": "UP25AK4922",
-            "rc_regn_dt": "14/12/2010",
-            "rc_owner_sr": "1",
-            "rc_registered_at": "UP25, RTO",
-            "rc_fit_upto": None,
-            "rc_tax_upto": None,
-            "rc_status_as_on": "30-Aug-2026",
-            "rc_financer": None,
-            "rc_insurance_comp": "National Insurance Company Ltd",
-            "rc_insurance_policy_no": "26020131266730212340",
-            "rc_insurance_upto": "2027-08-12",
-            "rc_vch_catg": "2W",
-            "rc_vh_class_desc": None,
-            "rc_manu_month_yr": None,
-            "rc_chasi_no": "JC47E0133748",
-            "rc_eng_no": "ME4JC472LA8086146",
-            "rc_cubic_cap": "50.00",
-            "rc_maker_desc": "HONDA",
-            "rc_maker_model": "CB TWISTER",
-            "rc_owner_name": "ROHIT SRIVASTAVA",
-            "rc_father_name": None,
-            "rc_present_address": ", 999999",
-            "rc_permanent_address": ", 999999",
-            "rc_fuel_desc": "PETROL",
-            "rc_wheelbase": None,
-            "rc_seat_cap": "2",
-            "rc_pucc_no": "UP02500590046455",
-            "rc_pucc_upto": "22/02/2027",
-        },
-        "message": "Data found!",
+        "category": "vehicle",
+        "name": "Honda CB Twister",
+        "identifier": "UP25AK4922",
+        "issuer": "National Insurance Company Ltd",
+        "holder": "Rohit",
+        "expiries": [
+            {
+                "key": "insurance",
+                "expires_on": days_from_now(45),
+                "reference": "26020131266730212340",
+            },
+            {"key": "pucc", "expires_on": days_from_now(200)},
+        ],
     }
 
 
 @pytest.fixture
-def stored_vehicle(mongo_database):
-    """Insert one vehicle directly and return its document."""
-    from core import mongo
-    from core.dates import now_utc, to_storage
-
-    document = {
-        "vehicle_no": "UP25AK4922",
-        "registration_date": to_storage("2010-12-14"),
-        "insurance": {
-            "company": "National Insurance Company Ltd",
-            "policy_no": "26020131266730212340",
-            "expires_on": to_storage("2027-08-12"),
-        },
-        "vehicle_category": "2W",
-        "chassis_no": "JC47E0133748",
-        "engine_no": "ME4JC472LA8086146",
-        "cubic_capacity": 50.0,
-        "maker": "HONDA",
-        "model": "CB TWISTER",
-        "owner_name": "ROHIT SRIVASTAVA",
-        "father_name": None,
-        "fuel": "PETROL",
-        "wheelbase": None,
-        "seat_capacity": 2,
-        "pucc": {
-            "certificate_no": "UP02500590046455",
-            "expires_on": to_storage("2027-02-22"),
-        },
-        "created_at": now_utc(),
-        "updated_at": now_utc(),
-        "last_fetched_at": now_utc(),
+def card_payload():
+    return {
+        "category": "credit_card",
+        "name": "HDFC Millennia",
+        "identifier": "4321",
+        "issuer": "HDFC Bank",
+        "expiries": [{"key": "card_expiry", "expires_on": days_from_now(90)}],
     }
-    result = mongo.vehicles_collection().insert_one(document)
-    document["_id"] = result.inserted_id
-    return document
+
+
+@pytest.fixture
+def stored_item(mongo_database, vehicle_payload):
+    """Insert one item through the service layer and return the document."""
+    from items import services
+
+    return services.create_item(vehicle_payload)
 
 
 class FakeResponse:
@@ -195,3 +163,26 @@ class FakeResponse:
 @pytest.fixture
 def fake_response():
     return FakeResponse
+
+
+@pytest.fixture
+def sent_emails(monkeypatch):
+    """Capture reminder emails instead of calling Brevo.
+
+    Returns the list the sweep appends to, so a test can assert on exactly
+    which reminders went out.
+    """
+    captured = []
+
+    def fake_send(item, entry, recipient):
+        captured.append(
+            {
+                "item": item,
+                "entry": entry,
+                "recipient": recipient,
+            }
+        )
+        return "message-%d" % len(captured)
+
+    monkeypatch.setattr("reminders.services.send_reminder_email", fake_send)
+    return captured

@@ -13,7 +13,7 @@ def root(_request):
         {
             "success": True,
             "data": {
-                "service": "vehicle-document-reminder",
+                "service": "expiry-reminders",
                 "docs": "See README.md for the API reference",
                 "health": "/api/health/",
             },
@@ -24,8 +24,7 @@ def root(_request):
 urlpatterns = [
     path("", root),
     path("api/auth/", include("authentication.urls")),
-    path("api/vehicles/", include("vehicles.urls")),
-    path("api/jobs/", include("jobs.urls")),
+    path("api/items/", include("items.urls")),
     path("api/settings/", include("appsettings.urls")),
     path("api/reminders/", include("reminders.urls")),
     path("api/health/", include("health.urls")),

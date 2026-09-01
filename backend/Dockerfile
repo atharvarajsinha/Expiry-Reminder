@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # ---------------------------------------------------------------------------
-# Production image.  One image, three roles (web / worker / beat) selected by
-# the container command -- see entrypoint.sh and the README deployment notes.
+# Production image.  One image, one role: the web server. The reminder sweep
+# runs inside it, so there is no worker or scheduler container to deploy.
 # ---------------------------------------------------------------------------
 FROM python:3.12-slim AS base
 
@@ -25,8 +25,8 @@ COPY . .
 
 # Never run as root.
 RUN useradd --create-home --uid 10001 appuser \
-    && mkdir -p /app/staticfiles /var/run/celery \
-    && chown -R appuser:appuser /app /var/run/celery
+    && mkdir -p /app/staticfiles \
+    && chown -R appuser:appuser /app
 USER appuser
 
 EXPOSE 8000
