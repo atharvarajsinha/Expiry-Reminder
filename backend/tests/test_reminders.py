@@ -528,6 +528,67 @@ class TestBrevoDelivery:
             send_reminder_email(self._item(), self._entry(), "owner@example.com")
         assert excinfo.value.code == "EMAIL_SEND_FAILED"
 
+    def test_brevo_own_reason_is_included(self, monkeypatch, fake_response):
+        # HTTP 401 alone cannot be acted on: Brevo returns it both for a key it
+        # does not know and for a key used from an IP that is not allow-listed.
+        # Its message says which, and even names the IP.
+        monkeypatch.setattr(
+            "reminders.email_service.requests.post",
+            lambda *a, **k: fake_response(
+                401,
+                {"code": "unauthorized", "message": "Unauthorized IP address 49.36.1.2"},
+            ),
+        )
+
+        with pytest.raises(EmailError) as excinfo:
+            send_reminder_email(self._item(), self._entry(), "owner@example.com")
+
+        assert "HTTP 401" in excinfo.value.message
+        assert "Unauthorized IP address 49.36.1.2" in excinfo.value.message
+
+    def test_the_reason_is_capped_and_flattened(self, monkeypatch, fake_response):
+        monkeypatch.setattr(
+            "reminders.email_service.requests.post",
+            lambda *a, **k: fake_response(
+                400, {"message": "x\n  y " + "z" * 500}
+            ),
+        )
+
+        with pytest.raises(EmailError) as excinfo:
+            send_reminder_email(self._item(), self._entry(), "owner@example.com")
+
+        assert "\n" not in excinfo.value.message
+        assert len(excinfo.value.message) < 300
+
+    def test_a_reason_that_echoed_the_key_is_redacted(
+        self, monkeypatch, fake_response
+    ):
+        # Brevo does not do this today. If it ever did, the key must not reach
+        # the stored error or the screen showing it.
+        monkeypatch.setattr(
+            "reminders.email_service.requests.post",
+            lambda *a, **k: fake_response(
+                401, {"message": "bad key test-brevo-key supplied"}
+            ),
+        )
+
+        with pytest.raises(EmailError) as excinfo:
+            send_reminder_email(self._item(), self._entry(), "owner@example.com")
+
+        assert "test-brevo-key" not in excinfo.value.message
+        assert "***" in excinfo.value.message
+
+    def test_a_non_json_error_body_is_ignored(self, monkeypatch, fake_response):
+        monkeypatch.setattr(
+            "reminders.email_service.requests.post",
+            lambda *a, **k: fake_response(502, None, text="<html>gateway</html>"),
+        )
+
+        with pytest.raises(EmailError) as excinfo:
+            send_reminder_email(self._item(), self._entry(), "owner@example.com")
+
+        assert excinfo.value.message == "The email service returned an error (HTTP 502)."
+
     def test_an_error_response_never_leaks_the_key(self, monkeypatch, fake_response):
         monkeypatch.setattr(
             "reminders.email_service.requests.post",
