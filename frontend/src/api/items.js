@@ -27,6 +27,20 @@ export function mapExpiry(raw) {
   };
 }
 
+/**
+ * One of a category's optional extras, as saved on an item - a vehicle's
+ * engine number, say. The server resolves the label and says whether the value
+ * is a date, so nothing here has to cross-reference the catalogue.
+ */
+export function mapDetail(raw) {
+  return {
+    key: raw.key,
+    label: raw.label,
+    kind: raw.kind,
+    value: raw.value ?? null,
+  };
+}
+
 /** `GET /api/items/` list entry and `GET /api/items/{id}/` detail alike. */
 export function mapItem(raw) {
   return {
@@ -38,6 +52,8 @@ export function mapItem(raw) {
     issuer: raw.issuer ?? null,
     holder: raw.holder ?? null,
     notes: raw.notes ?? null,
+    // Only the extras that were filled in, in catalogue order.
+    details: Array.isArray(raw.details) ? raw.details.map(mapDetail) : [],
     expiries: Array.isArray(raw.expiries) ? raw.expiries.map(mapExpiry) : [],
     // The soonest date still ahead - what the card headlines.
     nextExpiry: raw.next_expiry ? mapExpiry(raw.next_expiry) : null,
@@ -69,11 +85,29 @@ export function mapCategory(raw) {
       referenceLabel: entry.reference_label ?? null,
     })),
     defaultExpiries: raw.default_expiries || [],
+    // The optional fields this category adds to the form. Empty for most of
+    // them; a vehicle asks for its engine number, chassis number and
+    // registration date.
+    details: (raw.details || []).map((entry) => ({
+      key: entry.key,
+      label: entry.label,
+      kind: entry.kind,
+      placeholder: entry.placeholder || '',
+    })),
   };
 }
 
 /** The request body shared by create and update. */
-function toPayload({ category, name, identifier, issuer, holder, notes, expiries }) {
+function toPayload({
+  category,
+  name,
+  identifier,
+  issuer,
+  holder,
+  notes,
+  details,
+  expiries,
+}) {
   return {
     category,
     name,
@@ -81,6 +115,9 @@ function toPayload({ category, name, identifier, issuer, holder, notes, expiries
     issuer: issuer || '',
     holder: holder || '',
     notes: notes || '',
+    // Sent as typed; the server drops the blanks and anything the category
+    // does not declare, so there is nothing to filter here.
+    details: details || {},
     expiries: (expiries || []).map((entry) => ({
       key: entry.key,
       label: entry.label || '',

@@ -6,6 +6,11 @@
     "issuer": "National Insurance Company Ltd",
     "holder": "Atharva Sinha",
     "notes": "RTO Bareilly, Uttar Pradesh",
+    "details": {
+      "engine_number": "JC36ET1234567",
+      "chassis_number": "ME4JC369KET123456",
+      "registration_date": "2019-04-16"
+    },
     "expiries": [
       {
         "key": "insurance",

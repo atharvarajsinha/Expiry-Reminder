@@ -10,6 +10,7 @@ One collection holds everything the user tracks.  A stored item looks like::
       "issuer": "National Insurance",
       "holder": "Rohit",
       "notes": null,
+      "details": {"engine_number": "JC36ET1234567"},   # category-declared extras
       "expiries": [
         {"key": "insurance", "label": "Insurance",
          "expires_on": <datetime>, "reference": "2602...", "issued_on": null}
@@ -163,6 +164,39 @@ def normalize_expiries(category_key, raw_expiries):
     return cleaned
 
 
+def normalize_details(category_key, raw):
+    """Validate a category's optional detail fields into their stored shape.
+
+    The category's list is a whitelist: anything it does not declare is
+    dropped, so a stale client -- or a payload left over from the other
+    category the user was just looking at -- cannot smuggle a field into the
+    record.  A blank value is dropped too, because "left empty" and "not there"
+    mean the same thing for an optional field.
+    """
+    values = raw if isinstance(raw, dict) else {}
+    cleaned = {}
+
+    for field in categories.detail_fields(category_key):
+        value = values.get(field["key"])
+        if value is None or not str(value).strip():
+            continue
+
+        if field["kind"] == categories.DETAIL_DATE:
+            stored = to_storage(value)
+            if stored is None:
+                raise ApiError(
+                    ErrorCode.INVALID_DETAIL,
+                    "'%s' needs a valid date, or leave it empty."
+                    % field["label"],
+                    status_code=400,
+                )
+            cleaned[field["key"]] = stored
+        else:
+            cleaned[field["key"]] = clean_identifier(value)
+
+    return cleaned
+
+
 def build_document(payload):
     """Turn a validated request body into the stored item shape."""
     category_key = str(payload.get("category") or "").strip()
@@ -176,6 +210,7 @@ def build_document(payload):
 
     identifier = normalize_identifier(category_key, payload.get("identifier"))
     expiries = normalize_expiries(category_key, payload.get("expiries"))
+    details = normalize_details(category_key, payload.get("details"))
 
     return {
         "category": category_key,
@@ -187,6 +222,7 @@ def build_document(payload):
         "notes": (str(payload.get("notes")).strip()[:1000] or None)
         if payload.get("notes")
         else None,
+        "details": details,
         "expiries": expiries,
         "next_expiry_on": expiries[0]["expires_on"],
     }
@@ -368,6 +404,36 @@ def serialize_expiry(item, entry, today=None):
     }
 
 
+def serialize_details(item, category_key=None):
+    """The filled-in detail fields of an item, in catalogue order.
+
+    Each entry carries the label its category gives it, so the detail screen
+    can render them without looking the category up again.  A field the user
+    left empty is left out rather than sent as ``null``: the list is exactly
+    what is known about the item.
+    """
+    stored = item.get("details") or {}
+    key = category_key or item.get("category")
+    entries = []
+
+    for field in categories.detail_fields(key):
+        value = stored.get(field["key"])
+        if value is None:
+            continue
+        entries.append(
+            {
+                "key": field["key"],
+                "label": field["label"],
+                "kind": field["kind"],
+                "value": iso_date(value)
+                if field["kind"] == categories.DETAIL_DATE
+                else value,
+            }
+        )
+
+    return entries
+
+
 def serialize(item, today=None):
     """One payload shape for both the list and the detail endpoint.
 
@@ -395,6 +461,7 @@ def serialize(item, today=None):
         "issuer": item.get("issuer"),
         "holder": item.get("holder"),
         "notes": item.get("notes"),
+        "details": serialize_details(item),
         "expiries": expiries,
         "next_expiry": headline,
         "overall_status": overall,

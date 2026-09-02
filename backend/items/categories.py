@@ -9,6 +9,10 @@ category contributes three things:
 * **expiry presets**, the dates that kind of item usually has.  They seed the
   form only -- the API accepts any expiry key, so a user can add "Extended
   warranty" to a laptop without a code change;
+* **detail fields**, the optional extras only that kind of item has -- a
+  vehicle's engine number, chassis number and registration date.  Unlike an
+  expiry key this list *is* a whitelist: a detail the category does not declare
+  is dropped rather than stored, so the form and the record cannot drift;
 * **card handling**, which is what stops a full card number ever being stored.
 
 Adding a category means adding one entry here: the API exposes the whole
@@ -29,8 +33,18 @@ EXPIRY_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 CARD_CATEGORIES = ("credit_card", "debit_card")
 
 
+# The kinds of detail field a category can ask for.  ``date`` values are
+# parsed and stored like every other date; ``text`` ones are trimmed.
+DETAIL_TEXT = "text"
+DETAIL_DATE = "date"
+
+
 def _expiry(key, label, reference_label=None):
     return {"key": key, "label": label, "reference_label": reference_label}
+
+
+def _detail(key, label, kind=DETAIL_TEXT, placeholder=""):
+    return {"key": key, "label": label, "kind": kind, "placeholder": placeholder}
 
 
 CATEGORIES = {
@@ -54,6 +68,15 @@ CATEGORIES = {
             _expiry("permit", "Permit", "Permit number"),
         ],
         "default_expiries": ["insurance", "pucc"],
+        # Printed on the RC and asked for at every renewal, but not worth
+        # blocking a save over -- all three are optional.
+        "details": [
+            _detail("engine_number", "Engine number", placeholder="JC36ET1234567"),
+            _detail(
+                "chassis_number", "Chassis number", placeholder="ME4JC369KET123456"
+            ),
+            _detail("registration_date", "Registration date", DETAIL_DATE),
+        ],
     },
     "credit_card": {
         "label": "Credit card",
@@ -197,6 +220,16 @@ def is_card(category_key):
     return category_key in CARD_CATEGORIES
 
 
+def detail_fields(category_key):
+    """The optional detail fields a category asks for; ``()`` for most of them.
+
+    The single source of truth for which extras exist: the write path uses it
+    to decide what to keep and the read path to label what it found.
+    """
+    definition = CATEGORIES.get(category_key) or {}
+    return definition.get("details", ())
+
+
 def category_label(key):
     definition = CATEGORIES.get(key)
     return definition["label"] if definition else "Item"
@@ -236,6 +269,7 @@ def catalogue():
             "is_card": is_card(key),
             "expiries": definition["expiries"],
             "default_expiries": definition["default_expiries"],
+            "details": list(definition.get("details", ())),
         }
         for key, definition in CATEGORIES.items()
     ]

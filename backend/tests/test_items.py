@@ -37,10 +37,22 @@ class TestCategories:
         assert vehicle["identifier_required"] is True
         assert vehicle["is_card"] is False
         assert "insurance" in [entry["key"] for entry in vehicle["expiries"]]
+        # The optional extras the vehicle form offers, and their kinds.
+        details = {entry["key"]: entry for entry in vehicle["details"]}
+        assert set(details) == {
+            "engine_number",
+            "chassis_number",
+            "registration_date",
+        }
+        assert details["engine_number"]["kind"] == "text"
+        assert details["registration_date"]["kind"] == "date"
+        assert details["registration_date"]["label"] == "Registration date"
 
         card = catalogue["credit_card"]
         assert card["identifier_label"] == "Last 4 digits"
         assert card["is_card"] is True
+        # Only vehicles ask for extras, so every other form has none to draw.
+        assert card["details"] == []
 
 
 class TestCreate:
@@ -154,6 +166,98 @@ class TestCardSafety:
         response = auth_client.post("/api/items/", card_payload, format="json")
         assert response.status_code == 201
         assert response.data["data"]["identifier"] is None
+
+
+class TestVehicleDetails:
+    """The optional engine number, chassis number and registration date."""
+
+    def test_they_are_stored_and_returned_with_their_labels(
+        self, auth_client, vehicle_payload
+    ):
+        vehicle_payload["details"] = {
+            "engine_number": "JC36ET1234567",
+            "chassis_number": "ME4JC369KET123456",
+            "registration_date": "2019-04-16",
+        }
+        response = auth_client.post("/api/items/", vehicle_payload, format="json")
+        assert response.status_code == 201, response.data
+
+        details = response.data["data"]["details"]
+        # Catalogue order, not payload order, so the screen reads the same way
+        # whatever the client sent.
+        assert [entry["key"] for entry in details] == [
+            "engine_number",
+            "chassis_number",
+            "registration_date",
+        ]
+        assert details[0]["label"] == "Engine number"
+        assert details[0]["value"] == "JC36ET1234567"
+        assert details[2]["value"] == "2019-04-16"
+        assert details[2]["kind"] == "date"
+
+    def test_they_are_optional(self, auth_client, vehicle_payload):
+        response = auth_client.post("/api/items/", vehicle_payload, format="json")
+        assert response.status_code == 201
+        assert response.data["data"]["details"] == []
+
+    def test_a_blank_value_is_not_stored(
+        self, auth_client, vehicle_payload, mongo_database
+    ):
+        vehicle_payload["details"] = {
+            "engine_number": "  ",
+            "chassis_number": "ME4JC369KET123456",
+            "registration_date": "",
+        }
+        response = auth_client.post("/api/items/", vehicle_payload, format="json")
+        assert response.status_code == 201
+
+        keys = [entry["key"] for entry in response.data["data"]["details"]]
+        assert keys == ["chassis_number"]
+        stored = mongo_database["items"].find_one({})
+        assert stored["details"] == {"chassis_number": "ME4JC369KET123456"}
+
+    def test_an_unparseable_registration_date_is_rejected(
+        self, auth_client, vehicle_payload
+    ):
+        vehicle_payload["details"] = {"registration_date": "whenever"}
+        response = auth_client.post("/api/items/", vehicle_payload, format="json")
+        assert response.status_code == 400
+        assert response.data["error"]["code"] == "INVALID_DETAIL"
+
+    def test_a_registration_date_may_be_typed_the_indian_way(
+        self, auth_client, vehicle_payload
+    ):
+        vehicle_payload["details"] = {"registration_date": "16/04/2019"}
+        response = auth_client.post("/api/items/", vehicle_payload, format="json")
+        assert response.status_code == 201
+        assert response.data["data"]["details"][0]["value"] == "2019-04-16"
+
+    def test_a_detail_the_category_does_not_declare_is_dropped(
+        self, auth_client, card_payload, mongo_database
+    ):
+        # A card form offers no extras, so an engine number on one can only be
+        # a stale client or a hand-rolled request. It is ignored, not stored.
+        card_payload["details"] = {"engine_number": "JC36ET1234567"}
+        response = auth_client.post("/api/items/", card_payload, format="json")
+
+        assert response.status_code == 201
+        assert response.data["data"]["details"] == []
+        assert mongo_database["items"].find_one({})["details"] == {}
+
+    def test_editing_replaces_them(self, auth_client, vehicle_payload):
+        vehicle_payload["details"] = {"engine_number": "JC36ET1234567"}
+        created = auth_client.post(
+            "/api/items/", vehicle_payload, format="json"
+        ).data["data"]
+
+        vehicle_payload["details"] = {"chassis_number": "ME4JC369KET123456"}
+        response = auth_client.put(
+            "/api/items/%s/" % created["id"], vehicle_payload, format="json"
+        )
+
+        assert response.status_code == 200, response.data
+        details = {e["key"]: e["value"] for e in response.data["data"]["details"]}
+        assert details == {"chassis_number": "ME4JC369KET123456"}
 
 
 class TestExpiryValidation:

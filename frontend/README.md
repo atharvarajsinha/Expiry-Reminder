@@ -156,10 +156,11 @@ Three details worth knowing:
   user, and cards only ever hold four digits. One shape means a card and the detail
   screen can never disagree about an item's status.
 - **The category catalogue comes from the server.** Field labels ("Registration
-  number" vs "Last 4 digits"), expiry presets and the card flag are all fetched from
-  `/api/items/categories/`. Adding a category is a backend-only change; the only
-  thing the client owns is the icon component, mapped from an icon *name* in
-  `src/utils/categories.js` with a fallback so an unknown category still renders.
+  number" vs "Last 4 digits"), expiry presets, the optional extra fields and the
+  card flag are all fetched from `/api/items/categories/`. Adding a category — or
+  an extra field to one — is a backend-only change; the only thing the client owns
+  is the icon component, mapped from an icon *name* in `src/utils/categories.js`
+  with a fallback so an unknown category still renders.
 - **`POST /reminders/run/` is synchronous.** It answers with the finished summary
   (`{sent, skipped_already_sent, failed, …}`), so the toast can say exactly what
   happened rather than "queued".
@@ -224,6 +225,13 @@ with that category's defaults so the user starts from "fill in the dates" rather
 a bare form. The identifier is cleared on a category change, since a registration
 number is not four digits. Presets are offered as buttons that add a correctly
 labelled row; "Another date" adds a free-form one, slugged client-side.
+
+A category may also declare optional extra fields — a vehicle asks for its engine
+number, chassis number and registration date. They are rendered from the catalogue
+(`details` on the category, one input each, `date` ones as a date picker), so a new
+one appears in the form with no change here, and they are cleared on a category
+change for the same reason the identifier is. On the detail screen they are listed
+from the *category*, so one left empty still reads "Not set" rather than vanishing.
 
 ### Dashboard counters
 

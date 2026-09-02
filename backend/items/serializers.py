@@ -45,6 +45,17 @@ class ItemWriteSerializer(serializers.Serializer):
     notes = serializers.CharField(
         max_length=1000, required=False, allow_blank=True, allow_null=True
     )
+    # The optional extras a category declares -- ``{"engine_number": "..."}``
+    # for a vehicle.  Which keys mean anything is ``items.categories``'
+    # business, so this checks the shape only; a key the category does not
+    # declare is dropped by ``services.normalize_details``.
+    details = serializers.DictField(
+        child=serializers.CharField(
+            max_length=60, allow_blank=True, allow_null=True, trim_whitespace=True
+        ),
+        required=False,
+        allow_null=True,
+    )
     expiries = serializers.ListField(
         child=ExpirySerializer(), allow_empty=False, max_length=MAX_EXPIRIES_PER_ITEM
     )

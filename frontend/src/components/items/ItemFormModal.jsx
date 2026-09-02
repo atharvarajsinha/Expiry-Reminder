@@ -11,6 +11,7 @@ import {
   availablePresets,
   blankItemFor,
   categoryIcon,
+  detailFields,
   findCategory,
   formValuesFrom,
   referenceLabelFor,
@@ -154,6 +155,7 @@ export function ItemFormModal({ open, onClose, onSaved, categories, item = null 
     () => availablePresets(category, values.expiries),
     [category, values.expiries],
   );
+  const details = detailFields(category);
 
   // Reset whenever the dialog opens, so a cancelled edit never leaks into the
   // next one.
@@ -169,6 +171,13 @@ export function ItemFormModal({ open, onClose, onSaved, categories, item = null 
     setErrors((current) => ({ ...current, [field]: undefined }));
   };
 
+  const setDetail = (key, value) => {
+    setValues((current) => ({
+      ...current,
+      details: { ...current.details, [key]: value },
+    }));
+  };
+
   const onCategoryChange = (nextCategory) => {
     // Keep what the user has typed; swap only the category-shaped parts.
     setValues((current) => ({
@@ -178,7 +187,9 @@ export function ItemFormModal({ open, onClose, onSaved, categories, item = null 
       holder: current.holder,
       notes: current.notes,
       // An identifier means different things per category (a plate is not four
-      // digits), so it is cleared rather than carried across.
+      // digits), so it is cleared rather than carried across. The extra fields
+      // go the same way: `blankItemFor` empties them, because a chassis number
+      // means nothing on a passport.
       identifier: '',
     }));
     setErrors({});
@@ -370,6 +381,27 @@ export function ItemFormModal({ open, onClose, onSaved, categories, item = null 
             maxLength={120}
             autoComplete="off"
           />
+
+          {/* Whatever extras this category asks for - a vehicle's engine
+              number, chassis number and registration date. All optional, and
+              rendered from the catalogue so a new one needs no change here.
+              The category's placeholder is an example of the value, so
+              "Optional" is said in the hint instead - and said for every one of
+              them, including the dates, which cannot show a placeholder. */}
+          {details.map((field) => (
+            <Input
+              key={field.key}
+              id={`item-detail-${field.key}`}
+              type={field.kind === 'date' ? 'date' : 'text'}
+              label={field.label}
+              value={values.details?.[field.key] || ''}
+              onChange={(event) => setDetail(field.key, event.target.value)}
+              placeholder={field.kind === 'date' ? undefined : field.placeholder}
+              hint="Optional"
+              maxLength={field.kind === 'date' ? undefined : 60}
+              autoComplete="off"
+            />
+          ))}
         </div>
 
         <div>

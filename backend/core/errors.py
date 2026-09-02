@@ -26,6 +26,9 @@ class ErrorCode:
     ITEM_ALREADY_EXISTS = "ITEM_ALREADY_EXISTS"
     UNKNOWN_CATEGORY = "UNKNOWN_CATEGORY"
     INVALID_EXPIRY = "INVALID_EXPIRY"
+    # An optional detail field (a vehicle's registration date, say) was filled
+    # in with something unusable.
+    INVALID_DETAIL = "INVALID_DETAIL"
     INVALID_VEHICLE_NUMBER = "INVALID_VEHICLE_NUMBER"
     # Raised when a full card number is submitted: only the last four digits
     # are ever accepted, and the request is rejected rather than truncated.
