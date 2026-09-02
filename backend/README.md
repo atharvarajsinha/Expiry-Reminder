@@ -70,7 +70,7 @@ backend/
 │   └── validators.py  plate normalisation, the card-number guard
 ├── authentication/    login/refresh/logout/me, cookie JWT + double-submit CSRF
 ├── items/
-│   ├── categories.py  the catalogue: labels, expiry presets, card flags
+│   ├── categories.py  the catalogue: labels, expiry presets, extras, card flags
 │   ├── services.py    validation, persistence, serialisation
 │   └── management/commands/seed_items.py
 ├── reminders/
@@ -99,6 +99,11 @@ Indexed on `category`, `(category, identifier_key)`, `created_at`,
   "issuer": "National Insurance Company Ltd",
   "holder": "Rohit",
   "notes": null,
+  "details": {
+    "engine_number": "JC36ET1234567",
+    "chassis_number": "ME4JC369KET123456",
+    "registration_date": "2019-04-16T00:00:00Z"
+  },
   "expiries": [
     {
       "key": "insurance",
@@ -118,6 +123,10 @@ Indexed on `category`, `(category, identifier_key)`, `created_at`,
   detected against it, so `up25 ak 4922` and `UP25AK4922` are the same vehicle.
   It is scoped to the category — a credit card and a debit card may both end
   `4321`.
+- `details` holds the optional extras the item's category declares — a vehicle's
+  engine number, chassis number and registration date; most categories declare
+  none and store `{}`. The category's list is a whitelist: a key it does not
+  declare is dropped rather than saved, so the form and the record cannot drift.
 - `expiries` is sorted soonest-first on save, and `next_expiry_on` denormalises
   the first entry so the sweep and the list query can use an index instead of
   loading everything and sorting in Python.
@@ -347,6 +356,7 @@ valid `X-Cron-Token` in place of a session.
   "issuer": "National Insurance Company Ltd",
   "holder": "Rohit",
   "notes": null,
+  "details": { "engine_number": "JC36ET1234567", "registration_date": "2019-04-16" },
   "expiries": [
     { "key": "insurance", "expires_on": "2027-08-12", "reference": "2602…" },
     { "key": "pucc", "expires_on": "2027-02-22" }
@@ -362,8 +372,20 @@ the item.
 not a whitelist, so "extended cover" on a laptop needs no code change. On a
 `PUT`, `category` may be omitted and the stored one is kept.
 
+`details` is the opposite: only the keys the category declares are kept, and a
+blank value is treated as absent. Every one is optional. The response returns
+them as a list in catalogue order — `{key, label, kind, value}`, `kind` being
+`text` or `date` — so a client never has to look the labels up itself, and only
+the ones that were filled in are listed. A date detail is parsed like any other
+date (`16/04/2019` works) and comes back as `YYYY-MM-DD`. A `PUT` replaces the
+whole map, exactly as it replaces the expiry list.
+
+Which extras a category asks for is one entry in `items/categories.py`, exposed
+through `GET /api/items/categories/` as `details`, so adding one to a category
+— or adding it to another category — is a backend-only change.
+
 Notable errors: `INVALID_VEHICLE_NUMBER`, `CARD_NUMBER_REJECTED`,
-`INVALID_EXPIRY`, `UNKNOWN_CATEGORY`, `ITEM_ALREADY_EXISTS` (409, with the
+`INVALID_EXPIRY`, `INVALID_DETAIL`, `UNKNOWN_CATEGORY`, `ITEM_ALREADY_EXISTS` (409, with the
 clashing `item_id` in `details`), `ITEM_NOT_FOUND`.
 
 ### Reminders

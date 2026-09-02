@@ -50,7 +50,16 @@ export function iconForItem(catalogue, item) {
  */
 export function blankItemFor(category) {
   if (!category) {
-    return { category: '', name: '', identifier: '', issuer: '', holder: '', notes: '', expiries: [] };
+    return {
+      category: '',
+      name: '',
+      identifier: '',
+      issuer: '',
+      holder: '',
+      notes: '',
+      details: {},
+      expiries: [],
+    };
   }
 
   const presets = new Map(category.expiries.map((entry) => [entry.key, entry]));
@@ -62,6 +71,9 @@ export function blankItemFor(category) {
     issuer: '',
     holder: '',
     notes: '',
+    // A `key -> typed text` map. The category decides which keys the form
+    // shows, so an empty map is a complete starting point.
+    details: {},
     expiries: category.defaultExpiries.map((key) => ({
       key,
       label: presets.get(key)?.label || key,
@@ -80,6 +92,11 @@ export function formValuesFrom(item) {
     issuer: item.issuer || '',
     holder: item.holder || '',
     notes: item.notes || '',
+    // Only the extras that were filled in come back; the rest simply render
+    // empty, which is what they were.
+    details: Object.fromEntries(
+      (item.details || []).map((entry) => [entry.key, entry.value ?? '']),
+    ),
     expiries: item.expiries.map((entry) => ({
       key: entry.key,
       label: entry.label || '',
@@ -97,6 +114,15 @@ export function availablePresets(category, expiries) {
   if (!category) return [];
   const used = new Set((expiries || []).map((entry) => entry.key));
   return category.expiries.filter((preset) => !used.has(preset.key));
+}
+
+/**
+ * The optional fields a category adds to the form, in the order it lists them.
+ * Safe with a missing category, so the form can render before the catalogue
+ * has loaded.
+ */
+export function detailFields(category) {
+  return category?.details || [];
 }
 
 /** The label a preset gives an expiry key, for the reference field's hint. */

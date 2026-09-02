@@ -22,7 +22,7 @@ import { ReminderHistoryList } from '../components/reminders/ReminderList.jsx';
 import { deleteItem, getCategories, getItem } from '../api/items.js';
 import { getReminders } from '../api/reminders.js';
 import { useToast } from '../hooks/useToast.js';
-import { findCategory, iconForItem } from '../utils/categories.js';
+import { detailFields, findCategory, iconForItem } from '../utils/categories.js';
 import { formatDate, formatDateTime } from '../utils/date.js';
 import { ERROR_CODE, getApiError } from '../utils/errors.js';
 import { displayIdentifier } from '../utils/identifier.js';
@@ -73,6 +73,27 @@ function ExpiryRow({ expiry }) {
       <ExpiryStatus expiry={expiry} showDistance className="shrink-0" />
     </li>
   );
+}
+
+/**
+ * The category's optional extras as `DetailList` rows.
+ *
+ * Driven by the *category*, not by the item, so a field the user left empty
+ * still shows as "Not set" - the same reasoning as the issuer and holder rows.
+ * Dates are formatted; everything else is a reference number and reads better
+ * in mono.
+ */
+function detailRows(category, item) {
+  const saved = new Map((item.details || []).map((entry) => [entry.key, entry.value]));
+
+  return detailFields(category).map((field) => {
+    const value = saved.get(field.key) ?? null;
+    return {
+      label: field.label,
+      value: field.kind === 'date' ? (value ? formatDate(value) : null) : value,
+      mono: field.kind !== 'date',
+    };
+  });
 }
 
 /**
@@ -229,6 +250,7 @@ export default function ItemDetailsPage() {
                     ? 'Only the last 4 digits are stored.'
                     : undefined,
                 },
+                ...detailRows(category, item),
                 { label: 'Added', value: formatDateTime(item.createdAt) },
                 { label: 'Last edited', value: formatDateTime(item.updatedAt) },
               ]}
